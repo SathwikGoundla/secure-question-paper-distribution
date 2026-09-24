@@ -1,0 +1,31 @@
+# crypto-config.yaml — cryptogen input for the Phase 5A minimal network.
+#
+# Generates static (test-network style) MSP crypto material for:
+#   - 1 ordering-service organization (OrdererOrg), 1 orderer node
+#   - 1 peer organization (Org1), 1 peer, 1 admin, 1 regular user
+#
+# This is the standard, officially-documented "cryptogen" approach used
+# by Hyperledger Fabric's own samples for small/test networks — it does
+# NOT start a live Fabric CA process; fabric-ca-server/-client binaries
+# are used separately for any DYNAMIC enrollment story (documented in
+# scripts/, not required for this minimal network to function).
+#
+# Approved architecture (PROJECT_STATE.md Phase 5 readiness section):
+# 1 Org, 1 Peer, 1 Raft Orderer, LevelDB, 1 Channel.
+
+OrdererOrgs:
+  - Name: OrdererOrg
+    Domain: example.com
+    EnableNodeOUs: true
+    Specs:
+      - Hostname: orderer
+
+PeerOrgs:
+  - Name: Org1
+    Domain: org1.example.com
+    EnableNodeOUs: true
+    Template:
+      Count: 1
+      Start: 0
+    Users:
+      Count: 1

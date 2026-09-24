@@ -1,0 +1,30 @@
+{
+  "name": "fabric-gateway-adapter",
+  "version": "1.0.0",
+  "description": "Phase 5B internal HTTP adapter translating FastAPI's future FabricBlockchainService calls into real @hyperledger/fabric-gateway transactions against the paper-ledger chaincode.",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test:unit": "jest tests/unit",
+    "test:integration": "jest tests/integration --runInBand"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "1.14.4",
+    "@hyperledger/fabric-gateway": "1.12.1",
+    "express": "4.21.1"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3",
+    "@types/node": "20.16.11",
+    "@types/express": "4.17.21",
+    "jest": "29.7.0",
+    "ts-jest": "29.2.5",
+    "@types/jest": "29.5.13",
+    "supertest": "7.0.0",
+    "@types/supertest": "6.0.2"
+  }
+}
