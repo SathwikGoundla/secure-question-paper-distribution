@@ -13,8 +13,10 @@ Reference: LLD Section 25 (Configuration and Secrets Management).
 from functools import lru_cache
 from typing import List
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_VALID_FABRIC_VERIFICATION_MODES = ("best_effort", "strict")
 
 
 class Settings(BaseSettings):
@@ -114,6 +116,46 @@ class Settings(BaseSettings):
     # is out of Phase 5C's scope.
     FABRIC_CHANNEL_NAME: str = Field(default="")
     FABRIC_CHAINCODE_NAME: str = Field(default="")
+
+    # --- Phase 5E: blockchain-backed retrieval-time integrity verification ---
+    # (SRS FR-010/FR-011 extended with an independent ledger check; see
+    # PROJECT_STATE.md Phase 5E section for the full design/trade-off
+    # discussion). Only consulted when BLOCKCHAIN_BACKEND=fabric AND the
+    # configured backend actually supports verify_paper_hash() (StubBlockchainService
+    # does not — see blockchain_service.py — so under BLOCKCHAIN_BACKEND=stub this
+    # setting has no effect at all: paper_service.retrieve_paper() never calls
+    # verify_paper_hash() in that case).
+    #
+    #   "best_effort" (default) — if the Fabric Gateway Adapter/network cannot be
+    #       reached, or this paper has no ledger record at all (e.g. its Phase 5D
+    #       registration-time ledger write itself failed/was skipped), retrieval
+    #       proceeds on the strength of the already-passed local AES-256-GCM +
+    #       SHA-256 checks alone. A BLOCKCHAIN_VERIFICATION_UNAVAILABLE/DEGRADED
+    #       audit event is recorded so this is visible, never silent.
+    #   "strict" — the same two conditions instead reject retrieval with 503.
+    #
+    # In BOTH modes, an explicit Fabric match=False (a genuine, positive ledger
+    # disagreement — not an availability problem) ALWAYS fails retrieval with 409.
+    # This distinction is deliberate: this setting governs what happens when a
+    # comparison could not be obtained, never what happens when one WAS obtained
+    # and disagreed.
+    FABRIC_VERIFICATION_MODE: str = Field(default="best_effort")
+
+    @field_validator("FABRIC_VERIFICATION_MODE")
+    @classmethod
+    def _validate_fabric_verification_mode(cls, value: str) -> str:
+        """
+        Fails fast (at settings-construction time, i.e. app startup) rather
+        than silently accepting an unrecognized value and falling back to
+        some default behaviour deep inside paper_service.py — a typo here
+        must be loud, not swallowed (same discipline already applied to
+        get_blockchain_service()'s BLOCKCHAIN_BACKEND handling).
+        """
+        if value not in _VALID_FABRIC_VERIFICATION_MODES:
+            raise ValueError(
+                f"FABRIC_VERIFICATION_MODE must be one of {_VALID_FABRIC_VERIFICATION_MODES}, got {value!r}."
+            )
+        return value
 
     # --- Logging ---
     LOG_LEVEL: str = Field(default="INFO")

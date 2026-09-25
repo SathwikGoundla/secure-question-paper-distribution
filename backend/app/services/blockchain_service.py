@@ -64,6 +64,17 @@ class BlockchainService(ABC):
     Section 10 chaincode functions CC-01–CC-09.
     """
 
+    #: Phase 5E explicit capability flag. False by default (matches
+    #: verify_paper_hash()'s own default UnsupportedOperationException
+    #: behaviour below). Callers (paper_service.retrieve_paper()) check
+    #: THIS flag before calling verify_paper_hash() at all, rather than
+    #: calling-and-catching — so a backend that doesn't support ledger
+    #: verification (e.g. StubBlockchainService) is never actually
+    #: invoked for it, not merely "invoked and its exception is caught
+    #: every single time." Only FabricBlockchainService overrides this
+    #: to True.
+    supports_ledger_verification: bool = False
+
     @abstractmethod
     def register_paper(
         self, paper_id: uuid.UUID, sha256_hash: str, release_timestamp: datetime, metadata: dict[str, Any]

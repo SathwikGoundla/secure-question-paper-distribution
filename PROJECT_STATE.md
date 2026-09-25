@@ -855,3 +855,389 @@ No open decisions remain from Phase 5D itself. Recommended next steps, in order 
 1. **A deliberate, separately-approved decision on `verify_paper_hash()`** — should `retrieve_paper()` call it as an additional ledger-backed integrity gate alongside the existing AES-GCM tag + SHA-256 checks? This changes retrieval's failure modes (a third, network-dependent check) and deserves its own explicit sign-off, exactly as decision #3 of this phase deferred it.
 2. **Whether any of the 6 Fabric-unsupported `BlockchainService` methods should be added to the chaincode** — a Phase 5A/chaincode-scope decision, not a backend-wiring one; only relevant if the project owner wants the ledger to also record authorization/access-attempt/integrity-result/release/violation events (currently only registration + generic audit events reach Fabric).
 3. Per the original brief: **do not proceed to Phase 6 (React frontend) automatically** — this phase stops here, as instructed.
+
+---
+
+## 15. PHASE 5E — Blockchain-Backed Paper Integrity Verification (Retrieval)
+
+### 15.1 Objective
+
+Phase 5D deliberately left `verify_paper_hash()` unwired from `retrieve_paper()`
+(see 14.17 item 1). Phase 5E's objective was to design, get explicit
+sign-off on, and then implement that wiring: an additional,
+independent, ledger-backed integrity check at **retrieval** time,
+without weakening or replacing anything the local security controls
+(AES-256-GCM, SHA-256, time-lock, JWT/OTP, RBAC, audit logging)
+already do.
+
+An inspection-first design report was produced and reviewed by the
+project owner *before any code was touched* (per this phase's explicit
+process requirement). Three decisions required explicit confirmation
+before implementation began; all three were confirmed by the project
+owner and are recorded verbatim in 15.2 below.
+
+### 15.2 Confirmed decisions (recorded for permanent audit trail)
+
+1. **Fabric-unavailable policy**: `FABRIC_VERIFICATION_MODE=best_effort|strict`,
+   default `best_effort`. Under `best_effort`, a Fabric/adapter that
+   cannot be reached (or a paper with no ledger record at all) does
+   **not** block retrieval — the two already-passed local checks are
+   sufficient, and a `BLOCKCHAIN_VERIFICATION_UNAVAILABLE`/`DEGRADED`
+   audit event is recorded. Under `strict`, the same condition instead
+   rejects with 503. **In both modes**, an explicit `match=False` from
+   Fabric is a genuine, positive integrity disagreement and **always**
+   fails closed with 409 — never treated as "unavailable", never
+   swallowed.
+2. **Event names**: `LEDGER_HASH_MISMATCH` (security event, severity
+   `HIGH`) for an explicit ledger disagreement, paired with the
+   existing `TAMPER_DETECTED`/`REJECTED` audit event (reused, not
+   duplicated); `BLOCKCHAIN_VERIFICATION_UNAVAILABLE` (audit event,
+   outcome `DEGRADED` under best_effort / `FAILURE` under strict) when
+   a comparison could not be obtained at all. No "verification started"
+   or "local hash matched" events were added (would be noise, not
+   signal — existing `PAPER_RELEASED`/`SUCCESS` already implies both
+   local checks passed).
+3. **Configuration**: `FABRIC_VERIFICATION_MODE` added to
+   `app/config.py` with a `field_validator` that rejects any value
+   outside `{"best_effort", "strict"}` at Settings-construction time
+   (app startup), documented in `.env.example`.
+
+### 15.3 Final architecture / exact retrieval flow
+
+`retrieve_paper()` (`backend/app/services/paper_service.py`) now
+performs, in this exact order:
+
+```
+1. 404 check                                          [unchanged, Phase 4]
+2. Exam-centre authorization check                     [unchanged, Phase 4]
+3. Time-lock check                                     [unchanged, Phase 4]
+4. audit PAPER_ACCESS_ATTEMPT / PERMITTED               [unchanged, Phase 4]
+5. Retrieve ciphertext from off-chain storage           [unchanged, Phase 4]
+6. AES-256-GCM decrypt                                  [unchanged, Phase 4]
+     -> InvalidTag: existing tamper rejection (409)     (1st local gate)
+7. SHA-256(plaintext) vs paper.sha256_hash              [unchanged, Phase 4]
+     -> mismatch: existing tamper rejection (409)       (2nd local gate)
+8. NEW (Phase 5E): _verify_against_blockchain_ledger()  (3rd, independent gate)
+     a. if not blockchain.supports_ledger_verification:
+          -> skip entirely, no call made, no event      (Stub backend today)
+     b. else: match = blockchain.verify_paper_hash(paper_id, recomputed_hash)
+          - UnsupportedOperationException (defense-in-depth only)
+                -> skip, same as (a)
+          - ServiceUnavailableException / NotFoundException
+                -> "verification could not be obtained":
+                   best_effort: record BLOCKCHAIN_VERIFICATION_UNAVAILABLE/
+                                DEGRADED, continue
+                   strict:      record BLOCKCHAIN_VERIFICATION_UNAVAILABLE/
+                                FAILURE, raise 503
+          - match is False (genuine disagreement, ALWAYS fails closed,
+            both modes):
+                -> record LEDGER_HASH_MISMATCH (security, HIGH) +
+                   TAMPER_DETECTED/REJECTED (audit), raise 409
+          - match is True: fall through silently
+9. audit PAPER_RELEASED / SUCCESS                       [unchanged, Phase 4]
+10. return plaintext                                    [unchanged, Phase 4]
+```
+
+The new step is implemented as a private helper,
+`_verify_against_blockchain_ledger(db, current_user, paper, recomputed_hash)`,
+called after step 7 and before step 9. Its docstring in the source is
+the authoritative reference for the exact branch-by-branch reasoning
+(deliberately three separate, non-overlapping branches — never one
+broad `except Exception: continue`, per the explicit "do not swallow
+match=False" requirement).
+
+### 15.4 Hash semantics (unchanged — explicitly verified, not assumed)
+
+The hash sent to Fabric for comparison is the **exact same**
+`SHA256(plaintext)` value the existing local check (step 7 above)
+already computed — no second, incompatible hash definition was
+introduced, and the ciphertext-vs-plaintext hashing deviation from LLD
+Section 13 (documented back in Phase 4) is **not** revisited by this
+phase.
+
+### 15.5 AES-256-GCM's role (unchanged)
+
+Still the **first** tamper-detection gate, via the GCM authentication
+tag, verified as an intrinsic part of decryption — before any plaintext
+exists. Phase 5E's new blockchain check runs strictly **after** this
+gate has already passed (confirmed by a dedicated test — see 15.9).
+
+### 15.6 Blockchain verification's role (new, Phase 5E)
+
+A **third, independent** integrity gate. Its specific, honest value
+proposition (documented in the module docstring and worth restating
+here for faculty/viva purposes): the two existing local checks both
+ultimately trust PostgreSQL's own `papers.sha256_hash` column as the
+reference value — an attacker who compromises PostgreSQL directly
+(not the file, not the network) could edit both the stored file and
+that column consistently, and both local checks would still pass.
+Hyperledger Fabric's independently-stored hash is the only thing in
+this architecture external to PostgreSQL; calling `verify_paper_hash()`
+**after** local checks already pass closes that specific gap. It is
+additive, never a replacement — this was a hard, explicit design
+requirement and is enforced structurally (the local checks run first,
+unconditionally, regardless of blockchain backend or outcome).
+
+### 15.7 Backward compatibility — the capability-flag design decision
+
+**Important refinement made during implementation, not anticipated in
+full in the pre-implementation design report**: an early implementation
+using try/except `UnsupportedOperationException` around the
+`verify_paper_hash()` call technically still *called* the method on the
+Stub backend (immediately catching the exception) — this satisfied "the
+client never sees a 501" but did **not** satisfy the stronger, explicitly
+required test assertion "Stub `verify_paper_hash()` is never called" (a
+literal call-count-zero guarantee), which a dedicated spy-based test
+caught during this session (see 15.9).
+
+Resolved by adding an explicit **capability flag** to the
+`BlockchainService` abstraction rather than call-and-catch:
+
+- `BlockchainService.supports_ledger_verification: bool = False` (class
+  attribute, `app/services/blockchain_service.py`) — the default for
+  any backend that doesn't override it, including `StubBlockchainService`.
+- `FabricBlockchainService.supports_ledger_verification: bool = True`
+  (`app/services/fabric_blockchain_service.py`) — the only concrete
+  backend that actually implements ledger verification against a real
+  chaincode query.
+- `paper_service._verify_against_blockchain_ledger()` checks this flag
+  **before** calling `verify_paper_hash()` at all. Under
+  `BLOCKCHAIN_BACKEND=stub`, the method is **never invoked** — not
+  "invoked and its exception is caught every time."
+
+This is a small, additive, backward-compatible change (a class
+attribute with a safe default) to two files not originally listed as
+needing modification in the pre-implementation design report (Section
+I/J of that report said "no changes needed to blockchain_service.py's
+ABC") — flagged here explicitly per the project's own discipline of
+never silently deviating from a stated plan. The change is genuinely
+minimal and does not alter any existing method's signature or behavior.
+
+### 15.8 Files created
+
+| File | Purpose |
+|---|---|
+| `backend/tests/test_paper_retrieval_blockchain_verification.py` | 20 focused Phase 5E tests — see 15.9. |
+
+### 15.9 Files modified
+
+| File | Change |
+|---|---|
+| `backend/app/config.py` | Added `FABRIC_VERIFICATION_MODE: str = Field(default="best_effort")` with a `field_validator` rejecting anything outside `{"best_effort", "strict"}` at Settings-construction time. Only consulted when a backend both supports and cannot complete ledger verification (see 15.3 step 8b). |
+| `backend/.env.example` | Documented `FABRIC_VERIFICATION_MODE`, its default, its allowed values, and that it has no effect under `BLOCKCHAIN_BACKEND=stub`. |
+| `backend/app/services/blockchain_service.py` | Added `supports_ledger_verification: bool = False` class attribute to the `BlockchainService` ABC, with a docstring explaining its purpose (capability check, not call-and-catch — see 15.7). No existing method signature changed. |
+| `backend/app/services/fabric_blockchain_service.py` | Added `supports_ledger_verification: bool = True` override. No existing method changed. |
+| `backend/app/services/paper_service.py` | Added `UnsupportedOperationException` to imports. Updated module docstring (Phase 5E section) and `retrieve_paper()`'s docstring (new step 5 in its numbered list). Added new private helper `_verify_against_blockchain_ledger()` (~90 lines, extensively documented — see 15.3), called from `retrieve_paper()` between the existing local SHA-256 check and the existing `PAPER_RELEASED` audit event. No existing line of `retrieve_paper()`'s prior logic (steps 1–7, 9–10 in 15.3) was altered — only inserted around. |
+
+### 15.10 Files deleted
+
+None.
+
+### 15.11 Database changes
+
+**None.** `audit_events.event_type` and `security_events.event_type` are
+(and were already, since Phase 2/3) plain `String` columns, not enums —
+the two new event-type string values (15.2 item 2) required no schema
+migration, matching the exact precedent of every prior phase's new
+event types.
+
+### 15.12 API changes
+
+**None to any request/response shape.**
+`GET /api/v1/papers/{paper_id}/retrieve` keeps its existing signature
+and existing 200/403/404/409/503 status codes. Under the default
+`BLOCKCHAIN_BACKEND=stub`, external behavior is byte-for-byte unchanged
+from before Phase 5E (verified — see 15.9/15.13). Under
+`BLOCKCHAIN_BACKEND=fabric`, the only new *observable* behavior is that
+409/503 can now also originate from the new third gate, with their own
+distinct messages (never confused with the existing local-check 409
+message — different exact text).
+
+### 15.13 Blockchain / chaincode / Gateway Adapter changes
+
+**None.** Per the pre-implementation design report's finding (Section
+E–H of that report) and per the explicit instruction not to modify the
+chaincode or Gateway Adapter unless inspection proved it necessary:
+`VerifyPaperHash` (chaincode), `POST /fabric/verify-hash` (Gateway
+Adapter), and `FabricBlockchainService.verify_paper_hash()` were all
+already fully implemented and already unit-tested (Phase 5B/5C) before
+this phase began. Phase 5E only added the **caller** (`paper_service.py`)
+that was previously missing. Confirmed via `git diff --stat` (15.16
+below) that no file under `blockchain/` changed in this phase.
+
+### 15.14 Authentication / OTP / RBAC / time-lock impact
+
+**None.** All four remain structurally earlier in the request-handling
+order than the new blockchain-verification step (15.3, steps 1–4 for
+authn/authz/time-lock; JWT/OTP are enforced by the router dependency
+before `retrieve_paper()` is even called). Verified by a dedicated test
+(`test_time_lock_still_enforced_ahead_of_any_blockchain_check`) that
+would fail loudly (via `pytest.fail`) if the blockchain check were ever
+reached before the time-lock gate.
+
+### 15.15 Encryption / Hashing / Storage impact
+
+**None to their mechanisms.** AES-256-GCM and SHA-256 remain exactly as
+implemented since Phase 4 (see 15.5/15.4). Storage access pattern
+(`StorageService`, backend-only) is untouched.
+
+### 15.16 Security considerations (restated from the design report, now implemented as designed)
+
+- Confirmed by a dedicated test (`test_fabric_backend_called_with_exact_paper_id_and_hash_match_true_succeeds`,
+  assertion block "15.") that the only two keys ever present in a
+  `verify_paper_hash()` call are `paper_id` and `candidate_hash` — no
+  PDF bytes, AES key, wrapped DEK, nonce, OTP, JWT, password, or any
+  other secret is structurally reachable from that call site (the
+  method signature makes it impossible, and the test additionally
+  string-searches the call arguments for a forbidden-term list as a
+  second, independent check).
+- Confirmed by a dedicated test
+  (`test_blockchain_unavailable_warning_log_never_leaks_secrets`) that
+  the new `logger.warning(...)` call in the unavailable-branch never
+  logs the PDF content or any key/nonce material — only `paper_id`,
+  the exception's own (already-safe) message, and the configured mode.
+- The new network dependency this phase introduces (backend → adapter
+  → Fabric, only reachable at all under `BLOCKCHAIN_BACKEND=fabric`)
+  is exactly the trade-off analyzed and explicitly approved in the
+  pre-implementation design report (Section O of that report) —
+  `best_effort` as the default keeps retrieval's availability
+  unaffected by Fabric/adapter flakiness, while `strict` is available
+  for anyone who wants the stronger (but less demo-resilient)
+  guarantee.
+
+### 15.17 Test strategy and results
+
+**20 new Phase 5E tests** added in
+`backend/tests/test_paper_retrieval_blockchain_verification.py`,
+covering (mapped to the 20 requested items):
+
+1–2. Stub retrieval succeeds unchanged; `verify_paper_hash()` provably
+     never called (spy-based, not inference) — this test is what
+     surfaced the capability-flag design refinement in 15.7.
+3–4. Local SHA-256 success/mismatch paths unaffected; mismatch proven
+     to short-circuit before any blockchain call is attempted.
+5. AES-GCM tamper detection proven to reject before any blockchain call.
+6–7, 15. Fabric backend called with the exact `paper_id` and exact
+     recomputed plaintext hash; `match=True` succeeds; only
+     `paper_id`/`candidate_hash` ever present in the call.
+8–10. `match=False` → 409, `LEDGER_HASH_MISMATCH`/`HIGH` recorded,
+     `TAMPER_DETECTED`/`REJECTED` recorded, no `PAPER_RELEASED` event
+     exists for that paper; response body never contains the PDF bytes.
+11–12. Fabric unavailable + `best_effort` (proven to be the real
+     default, not just assumed) → 200, `BLOCKCHAIN_VERIFICATION_UNAVAILABLE`/
+     `DEGRADED` recorded, plus a dedicated test for the
+     paper-not-registered-on-ledger (`NotFoundException`) case,
+     treated identically under best_effort.
+13. Fabric unavailable + `strict` → 503, `BLOCKCHAIN_VERIFICATION_UNAVAILABLE`/
+     `FAILURE` recorded; a companion test confirms `match=False` still
+     returns 409 (not 503) even in strict mode — the "never swallowed"
+     requirement holds in both modes.
+14. A backend that claims support but still raises
+     `UnsupportedOperationException` internally never surfaces a 501
+     (defense-in-depth branch, 15.3 step 8b).
+16–19. RBAC (Admin cannot call `/retrieve`), time-lock (still enforced
+     ahead of the new check, proven via an exploding fake), full
+     regression via the existing suite.
+20. Registration (`register_paper()`, Phase 5D) proven completely
+     untouched by this phase (smoke check).
+
+Plus two tests beyond the requested 20: config validation
+(`FABRIC_VERIFICATION_MODE` rejects an invalid value at
+Settings-construction) and a log-safety check (15.16).
+
+**Also explicitly required and NOT swallowed**: a dedicated test
+(`test_unexpected_exception_type_is_not_swallowed_by_best_effort_policy`)
+proves that an exception type *other than* `ServiceUnavailableException`/
+`NotFoundException` (a `ValidationFailedException`, standing in for a
+genuine bug) propagates as its own distinct error and is never
+reinterpreted as "unavailable" — satisfying the explicit "do not catch
+every exception and silently continue" instruction structurally, not
+just by convention.
+
+**Results, this session, run from a completely clean re-extraction of
+the Phase 5D checkpoint** (no prior Phase 5E artifacts existed):
+
+| Suite | Environment | Result |
+|---|---|---|
+| Full backend suite (`pytest -q --ignore=test_phase2_manual.py`) | SQLite (default, matches every prior phase's fast path) | **107 passed** (87 pre-existing + 20 new), 0 failed |
+| Same suite, `--randomly-seed=12345` | SQLite | **107 passed** |
+| Same suite, `--randomly-seed=999` | SQLite | **107 passed** (order-independence confirmed across two different seeds) |
+| Full backend suite | **Real PostgreSQL 16** (installed this session via `apt-get install postgresql postgresql-contrib`, matching Phase 5D's own precedent) | **107 passed** |
+| `python3 -m compileall app tests` | — | Clean, no syntax errors across the whole backend |
+| `tests/test_phase2_manual.py` (28-check script) | **Real running `uvicorn` server + real PostgreSQL 16** | **28/28 PASSED** |
+| Ad hoc live Phase 5E end-to-end script (register → authorize → retrieve success → tamper → 409), real HTTP, real Postgres, real AES-256-GCM/SHA-256, real (unmocked) `StubBlockchainService` | Real running `uvicorn` server + real PostgreSQL 16 | **7/7 PASSED** |
+
+All of the above were actually executed in this session; none are
+inferred or assumed. `pytest-randomly` (used only for the
+order-independence check) was `pip install`ed for this session only —
+it is **not** added to `requirements.txt` and is not part of the
+committed project.
+
+### 15.18 Live Fabric verification
+
+**Not performed.** No Docker is available in this sandbox (same,
+unchanged constraint documented in every Phase-5 session's own
+PROJECT_STATE.md entry — 13.8, 14.14). No claim of live Fabric,
+live Gateway-Adapter-to-Fabric, or live chaincode execution is made
+anywhere in this report. Every "Fabric" scenario exercised this session
+(match=True, match=False, unavailable) was exercised via a small
+in-process fake object implementing exactly the `verify_paper_hash(paper_id,
+candidate_hash) -> bool` contract (monkeypatched in for
+`get_blockchain_service()`), run through the **real** FastAPI app, real
+RBAC, real authentication, and (for the PostgreSQL-tier run) a real
+database — this proves `paper_service.py`'s new orchestration logic is
+correct for every outcome `get_blockchain_service()` can return, which
+is exactly the layer this phase changed. It does **not** prove Fabric
+connectivity itself, and this distinction is deliberate (matching the
+exact discipline of 14.14 above).
+
+### 15.19 Known limitations after Phase 5E
+
+1. Everything listed in 14.16 (Phase 5D's known limitations) still
+   applies unchanged — none of it was in this phase's scope.
+2. No live Fabric network verification was possible in this sandbox —
+   see 15.18 (same, unchanged constraint as every prior Phase-5 session).
+3. The `NotFoundException`-as-"unavailable" design choice (15.3, step
+   8b) is a genuine judgment call made during this phase, not something
+   explicitly dictated by the confirmed decisions in 15.2 (which spoke
+   of "Fabric unavailable", not specifically "paper not found on the
+   ledger"). The reasoning (a paper can legitimately have no ledger
+   record today, because Phase 5D's own registration-time ledger write
+   is itself best-effort — see 14.16 item 4) is documented in the
+   `_verify_against_blockchain_ledger()` docstring and here, but this
+   is flagged explicitly as a design decision made *during*
+   implementation that the project owner has not separately signed off
+   on, in case a different treatment is preferred (e.g. treating a
+   missing ledger record as its own distinct, stricter case).
+4. This sandbox's PostgreSQL/uvicorn background processes still do not
+   persist reliably across separate tool-call boundaries (identical to
+   the constraint noted in 14.16 item 6) — every live check in this
+   phase was run via a single self-contained shell script (start
+   server, run checks, stop server) within one tool invocation, not
+   across several.
+5. `supports_ledger_verification` is a plain class attribute, not
+   enforced by the `BlockchainService` ABC's `@abstractmethod`
+   machinery — a future backend author could forget to set it. This is
+   a minor, low-risk limitation (the base class default of `False` is
+   the safe direction to fail in) rather than a defect, but is noted
+   for completeness.
+
+### 15.20 Pending work / exact next recommended step
+
+No open decisions remain from Phase 5E itself (all three
+pre-implementation decisions in 15.2 were confirmed and implemented
+exactly as specified, with the one additive refinement in 15.7
+documented above). Recommended next steps, in order:
+
+1. **Project-owner review of the `NotFoundException`-as-"unavailable"
+   judgment call** (15.19 item 3) — confirm or override before treating
+   it as final.
+2. Per the original brief: **do not proceed to Phase 6 (React
+   frontend), dashboard work, deployment, QR verification, or any AI
+   insider-threat feature** — this phase stops here, as instructed.
+3. Whenever a persistent-Docker environment becomes available: run the
+   actual Phase 5A Fabric network + Phase 5B adapter + this phase's new
+   `retrieve_paper()` path together for the first genuinely live,
+   end-to-end blockchain-backed tamper-detection demonstration — this
+   remains the single biggest gap between "designed and tested" and
+   "demonstrated exactly as marketed," unchanged since Phase 5A.

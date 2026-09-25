@@ -150,6 +150,11 @@ class FabricBlockchainService(BlockchainService):
     mapping and data-mapping notes.
     """
 
+    #: Phase 5E: the only concrete BlockchainService that actually
+    #: implements verify_paper_hash() against a real chaincode query —
+    #: see blockchain_service.py's docstring for how callers use this.
+    supports_ledger_verification: bool = True
+
     def __init__(
         self,
         base_url: str,

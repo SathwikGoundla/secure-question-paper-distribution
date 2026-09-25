@@ -8,12 +8,9 @@ AuditService) with the new CryptoService — no authentication or RBAC
 logic is duplicated or modified here; that remains entirely in
 app/api/deps.py and app/services/auth_service.py.
 
-Explicitly OUT OF SCOPE (still, after Phase 5D) and therefore NOT
+Explicitly OUT OF SCOPE (still, after Phase 5E) and therefore NOT
 implemented here:
   - React frontend, evaluation, feedback
-  - Ledger-backed retrieval verification (verify_paper_hash() is NOT
-    called from retrieve_paper() — an explicit Phase 5D scope decision,
-    deferred to a later, separately-planned phase; see PROJECT_STATE.md)
 
 Phase 4 addition: time-lock enforcement (SRS FR-012/FR-016; LLD Section
 16) is now implemented in retrieve_paper() below — see that function's
@@ -27,6 +24,40 @@ that function's body for the exact failure-tolerance reasoning (it
 mirrors audit_service.record_audit_event()'s already-established
 pattern: blockchain unavailability never fails a registration that
 PostgreSQL/storage already accepted).
+
+Phase 5E addition: retrieve_paper() now ALSO calls
+get_blockchain_service().verify_paper_hash(paper_id, recomputed_hash)
+as a THIRD, independent integrity gate, after the two existing local
+gates (AES-256-GCM auth tag, then SHA-256-of-plaintext vs
+paper.sha256_hash) both already succeed. This is deliberately additive,
+never a replacement:
+  - Under BLOCKCHAIN_BACKEND=stub, verify_paper_hash() is never called
+    at all — guarded by BlockchainService.supports_ledger_verification,
+    an explicit capability flag (False for StubBlockchainService, True
+    only for FabricBlockchainService; see blockchain_service.py) checked
+    BEFORE any call is attempted — so retrieval behaves EXACTLY as it
+    did before Phase 5E under the default backend. This is a hard
+    backward-compatibility requirement, not an incidental detail.
+  - Under BLOCKCHAIN_BACKEND=fabric, an explicit ledger match=False is a
+    genuine, positive integrity disagreement from an INDEPENDENT source
+    (Fabric's own copy of the hash, recorded at registration and never
+    touched by anything that could also have touched PostgreSQL) and
+    ALWAYS rejects the paper (409) — this is never swallowed by any
+    failure-tolerance policy, in either best_effort or strict mode
+    (FABRIC_VERIFICATION_MODE, app/config.py).
+  - Only when a comparison could not be OBTAINED AT ALL (Fabric/adapter
+    unreachable or timed out, or this specific paper has no ledger
+    record — e.g. its Phase 5D registration-time ledger write itself
+    failed) does FABRIC_VERIFICATION_MODE decide the outcome:
+    "best_effort" (default) proceeds on the two local checks alone and
+    records BLOCKCHAIN_VERIFICATION_UNAVAILABLE/DEGRADED;
+    "strict" rejects with 503 instead. See that setting's docstring in
+    app/config.py, and PROJECT_STATE.md's Phase 5E section, for the
+    full trade-off reasoning behind defaulting to best_effort.
+  - The hash sent to Fabric for comparison is the SAME
+    SHA256(plaintext) value already computed for the existing local
+    check (Section "Hashing design" below) — no second, incompatible
+    hash definition is introduced.
 """
 
 from __future__ import annotations
@@ -44,6 +75,7 @@ from app.exceptions.base import (
     ForbiddenException,
     NotFoundException,
     ServiceUnavailableException,
+    UnsupportedOperationException,
     ValidationFailedException,
 )
 from app.models.exam_centre import ExamCentre
@@ -319,6 +351,11 @@ def retrieve_paper(db: Session, current_user: CurrentUser, paper_id: uuid.UUID) 
          confirmation — see crypto_service.py's module docstring for
          why the check order differs from LLD Section 17's original
          pseudocode, which hashed the ciphertext).
+      5. (Phase 5E) Blockchain-backed ledger verification — a THIRD,
+         independent integrity gate, only when the configured backend
+         supports it (see _verify_against_blockchain_ledger()'s
+         docstring below for the full three-outcome handling and the
+         module docstring above for the security rationale).
 
     SECURITY REASONING for checking authorization BEFORE time-lock
     (matching LLD Section 16 Step 2 before Steps 3-6, not the reverse):
@@ -417,8 +454,139 @@ def retrieve_paper(db: Session, current_user: CurrentUser, paper_id: uuid.UUID) 
             "This paper failed integrity verification and cannot be released."
         )
 
+    # --- Phase 5E: blockchain-backed integrity verification (SRS FR-010/
+    # FR-011 extended; see module docstring above and PROJECT_STATE.md's
+    # Phase 5E section for the full design). This is a THIRD, independent
+    # gate — it never replaces the two local checks above, which have
+    # already both succeeded by this point.
+    _verify_against_blockchain_ledger(db, current_user, paper, recomputed_hash)
+
     record_audit_event(
         db, "PAPER_RELEASED", actor_id=current_user.user_id, outcome="SUCCESS", paper_id=paper_id
     )
 
     return plaintext
+
+
+def _verify_against_blockchain_ledger(
+    db: Session, current_user: CurrentUser, paper: Paper, recomputed_hash: str
+) -> None:
+    """
+    Phase 5E. Calls get_blockchain_service().verify_paper_hash() with the
+    SAME SHA256(plaintext) value the local check just used (no second,
+    incompatible hash definition — see crypto_service.py / module
+    docstring). Raises ConflictException (409) on a genuine ledger
+    disagreement; otherwise returns None (paper may proceed).
+
+    Exactly three outcomes are possible, and they are handled by three
+    separate, non-overlapping branches below — this function does NOT
+    use one broad `except Exception: continue` (that would silently
+    swallow a genuine match=False along with real unavailability, which
+    is explicitly forbidden):
+
+      1. The configured backend does not implement ledger verification
+         at all (BlockchainService.supports_ledger_verification is
+         False — the PERMANENT, EXPECTED state for BLOCKCHAIN_BACKEND=
+         stub; only FabricBlockchainService sets this True — see
+         blockchain_service.py). Checked via this explicit capability
+         flag BEFORE calling verify_paper_hash() at all, so an
+         unsupporting backend is never actually invoked for it (not
+         "invoked and its UnsupportedOperationException is caught every
+         time" — literally never called). Not a failure of any kind:
+         skip silently, no audit event (an audit event for "stub
+         doesn't support this" on every single retrieval would be
+         noise, not signal).
+
+      2. Verification COULD NOT BE OBTAINED (ServiceUnavailableException —
+         Fabric/adapter unreachable, timed out, or returned an unexpected
+         error; or NotFoundException — this specific paper_id has no
+         ledger record at all, which can legitimately happen today
+         because Phase 5D's own registration-time ledger write is itself
+         best-effort and can fail/be skipped). Governed by
+         FABRIC_VERIFICATION_MODE:
+           - "best_effort" (default): record
+             BLOCKCHAIN_VERIFICATION_UNAVAILABLE/DEGRADED and return
+             (the two already-passed local checks are sufficient).
+           - "strict": record the same event with outcome FAILURE and
+             raise ServiceUnavailableException (503).
+
+      3. Verification WAS obtained and disagrees (match is False). This
+         is a genuine, positive integrity signal from a source
+         independent of PostgreSQL (see module docstring's security
+         rationale) and is NEVER treated as "unavailable" — it always
+         raises ConflictException (409), in BOTH best_effort and strict
+         mode, regardless of FABRIC_VERIFICATION_MODE.
+
+    match is True falls through with no new audit event — PAPER_RELEASED/
+    SUCCESS (recorded by the caller immediately after this returns)
+    already covers "everything passed."
+    """
+    settings = get_settings()
+    blockchain = get_blockchain_service()
+
+    if not getattr(blockchain, "supports_ledger_verification", False):
+        # Branch 1 — see docstring. verify_paper_hash() is deliberately
+        # NEVER CALLED here (this is a capability check, not a
+        # call-and-catch) — this is what keeps BLOCKCHAIN_BACKEND=stub
+        # retrieval byte-for-byte unchanged from before Phase 5E.
+        return
+
+    try:
+        match = blockchain.verify_paper_hash(paper_id=paper.paper_id, candidate_hash=recomputed_hash)
+    except UnsupportedOperationException:
+        # Defense-in-depth only: a backend that claims support via the
+        # flag above but still raises this would be an internal
+        # inconsistency in that backend, not an expected path today (no
+        # shipped backend does this) — handled the same as Branch 1
+        # rather than crashing the retrieval.
+        return
+    except (ServiceUnavailableException, NotFoundException) as exc:
+        # Branch 2 — see docstring. Deliberately narrow: only these two
+        # exception types are treated as "verification could not be
+        # obtained." Any other exception type (e.g. a ValidationFailedException
+        # or ConflictException from the adapter itself, which would indicate
+        # an unexpected bug in the request this code builds, not an
+        # availability problem) is NOT caught here and propagates as-is,
+        # per the explicit instruction not to catch every exception.
+        logger.warning(
+            "Blockchain-backed integrity verification could not be completed for "
+            "paper_id=%s (%s: %s); FABRIC_VERIFICATION_MODE=%s.",
+            paper.paper_id,
+            type(exc).__name__,
+            exc.message,
+            settings.FABRIC_VERIFICATION_MODE,
+        )
+        if settings.FABRIC_VERIFICATION_MODE == "strict":
+            record_audit_event(
+                db,
+                "BLOCKCHAIN_VERIFICATION_UNAVAILABLE",
+                actor_id=current_user.user_id,
+                outcome="FAILURE",
+                paper_id=paper.paper_id,
+            )
+            raise ServiceUnavailableException(
+                "Blockchain-backed integrity verification is currently unavailable "
+                "and FABRIC_VERIFICATION_MODE=strict requires it to succeed before "
+                "this paper can be released."
+            ) from exc
+        record_audit_event(
+            db,
+            "BLOCKCHAIN_VERIFICATION_UNAVAILABLE",
+            actor_id=current_user.user_id,
+            outcome="DEGRADED",
+            paper_id=paper.paper_id,
+        )
+        return
+
+    if match is False:
+        # Branch 3 — see docstring. Always fails closed, in both modes.
+        record_security_event(
+            db, "LEDGER_HASH_MISMATCH", actor_id=current_user.user_id, paper_id=paper.paper_id, severity="HIGH"
+        )
+        record_audit_event(
+            db, "TAMPER_DETECTED", actor_id=current_user.user_id, outcome="REJECTED", paper_id=paper.paper_id
+        )
+        raise ConflictException(
+            "This paper failed blockchain-backed integrity verification and cannot be released."
+        )
+    # match is True: fall through, no new event (see docstring).
