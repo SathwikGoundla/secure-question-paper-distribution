@@ -5,7 +5,7 @@ uvicorn[standard]==0.30.6
 # --- Configuration ---
 pydantic==2.9.2
 pydantic-settings==2.5.2
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 
 # --- Database ---
 sqlalchemy==2.0.35
@@ -19,16 +19,16 @@ psycopg2-binary==2.9.9
 # working during Phase 1 validation (see docs/PHASE1_IMPLEMENTATION_STATUS.md).
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
-pyjwt==2.9.0
+pyjwt==2.13.0
 
 # --- File uploads (multipart form data, used by paper registration, Phase 3) ---
-python-multipart==0.0.9
+python-multipart==0.0.31
 
 # --- Cryptography (Phase 3: AES-256-GCM + SHA-256, see app/services/crypto_service.py) ---
 cryptography==43.0.3
 
 # --- Testing ---
-pytest==8.3.3
+pytest==9.0.3
 
 # --- HTTP client ---
 # Used by tests' TestClient AND, since Phase 5C, at runtime by
