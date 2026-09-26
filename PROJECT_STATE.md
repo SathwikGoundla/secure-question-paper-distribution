@@ -49,8 +49,10 @@ React.js (frontend, **not yet present in this repo**), Python FastAPI, PostgreSQ
 | **Phase 5A — Fabric network + chaincode foundation** | **COMPLETE** (see Section 11) |
 | Phase 5B — Fabric Gateway Adapter | COMPLETE (see Section 12) |
 | Phase 5C — Connect FastAPI backend to the Gateway Adapter | COMPLETE (see Section 13) |
-| **Phase 5D — Wire paper registration to the blockchain abstraction** | **COMPLETE this session** (see Section 14) |
-| Phase 6 — React frontend | NOT STARTED |
+| **Phase 5D — Wire paper registration to the blockchain abstraction** | **COMPLETE** (see Section 14) |
+| Phase 5E — Blockchain-backed integrity verification at retrieval | COMPLETE (see Section 15) |
+| **Phase 6A — React frontend foundation (auth + routing shell only)** | **COMPLETE this session** (see Section 16) |
+| Phase 6B — Admin Portal | NOT STARTED |
 | Phase 7 — Evaluation / feedback modules | NOT STARTED |
 
 ## 4. Known documentation-vs-code gap (pre-existing, not introduced this session)
@@ -1241,3 +1243,256 @@ documented above). Recommended next steps, in order:
    end-to-end blockchain-backed tamper-detection demonstration — this
    remains the single biggest gap between "designed and tested" and
    "demonstrated exactly as marketed," unchanged since Phase 5A.
+
+---
+
+## 16. PHASE 6A — React Frontend Foundation — COMPLETE
+
+### 16.1 Objective
+
+Create the React/TypeScript/Vite frontend **foundation only**: a
+working dev server and production build, a centralized API client, an
+authentication foundation genuinely compatible with the backend's
+actual auth contract, a routing skeleton with protected routes, and
+placeholder pages for the Admin Portal / Examination Centre Portal.
+Explicitly **not** in scope: the Admin dashboard, the Exam Centre
+dashboard, analytics, or any blockchain UI.
+
+### 16.2 Mandatory inspection performed before any code was written
+
+Per the phase's explicit process requirement, the following was read
+directly from source (not assumed from documentation) before touching
+any file:
+
+- `backend/app/main.py`, `backend/app/config.py`
+- `backend/app/api/v1/router.py`, `backend/app/api/v1/auth.py`
+- `backend/app/schemas/auth.py`
+- `backend/app/api/deps.py`, `backend/app/exceptions/handlers.py`
+- `backend/app/models/role.py`
+- `backend/.env.example`
+- `backend/requirements.txt`
+- Full backend test suite (baseline run before any change)
+- `git log` / `git status` (clean at Phase 5E checkpoint `0818431`)
+- Confirmed **no frontend directory existed** prior to this phase.
+
+No discrepancy was found between `PROJECT_STATE.md`'s description of
+the auth flow and the actual backend code — the two agree.
+
+### 16.3 Confirmed backend contract used (nothing invented)
+
+| Endpoint | Method | Request | Response |
+|---|---|---|---|
+| `/api/v1/auth/login` | POST | `{username, password}` | `{otp_required, pre_auth_token}` |
+| `/api/v1/auth/otp/verify` | POST | `{pre_auth_token, otp_code}` | `{access_token, token_type, role}` |
+| `/api/v1/auth/logout` | POST (Bearer) | — | `{detail}` |
+| `/api/v1/auth/me` | GET (Bearer) | — | `{user_id, username, role, centre_id}` |
+
+- Roles (fixed set, `backend/app/models/role.py`): `Admin`,
+  `Examination Centre`, `Auditor`.
+- Error shape (all non-2xx responses, `exceptions/handlers.py`):
+  `{"error": {"message": string, "status_code": number}}`.
+- CORS default origin: `http://localhost:3000` (`backend/.env.example`)
+  — this is Vite's default dev port, so **no backend change was
+  required**.
+
+Endpoints that exist in the backend but are not consumed by Phase 6A
+(papers, admin, exam-session, audit, health) were intentionally **not**
+wrapped in `src/api/endpoints.ts` yet — they belong to Phase 6B+ and
+will be added only when a page actually needs them.
+
+### 16.4 Frontend technology
+
+React 18 + TypeScript 5 + Vite 5, `react-router-dom` for routing,
+Vitest + React Testing Library for tests. No UI component library, no
+state-management library, no CSS framework — kept intentionally
+minimal for a Phase 6A foundation.
+
+### 16.5 Files created
+
+```
+frontend/
+├── .env.example
+├── README.md
+├── index.html
+├── package.json
+├── tsconfig.json / tsconfig.app.json / tsconfig.node.json
+├── vite.config.ts
+└── src/
+    ├── api/client.ts, endpoints.ts, client.test.ts
+    ├── components/common/Button.tsx, Input.tsx, LoadingIndicator.tsx, ErrorBanner.tsx
+    ├── components/layout/AppHeader.tsx, PageContainer.tsx
+    ├── contexts/AuthContext.tsx
+    ├── hooks/useAuth.ts
+    ├── pages/auth/LoginPage.tsx (+.test.tsx), OTPPage.tsx (+.test.tsx), AuthFlow.integration.test.tsx
+    ├── pages/placeholder/PlaceholderPage.tsx, AdminPlaceholderPage.tsx, ExamCentrePlaceholderPage.tsx
+    ├── pages/errors/NotFoundPage.tsx, UnauthorizedPage.tsx
+    ├── routes/AppRoutes.tsx, ProtectedRoute.tsx (+.test.tsx)
+    ├── types/auth.ts, api.ts
+    ├── test/setupTests.ts, testUtils.tsx
+    ├── App.tsx, main.tsx, index.css, vite-env.d.ts
+```
+
+### 16.6 Files modified
+
+- `.gitignore` — added `frontend/.env`, `frontend/.env.local`,
+  `frontend/.env.*.local`, `frontend/coverage/` (node_modules/dist
+  were already covered by pre-existing unscoped patterns).
+- `PROJECT_STATE.md` — this section, plus the Section 3 status table.
+- **No backend file was modified.** CORS already permitted the Vite
+  default origin, so the "minimum necessary backend change" allowed by
+  the brief turned out to be **zero changes**.
+
+### 16.7 Authentication flow implemented
+
+`unauthenticated` → `authenticating` → (`otp_required` |
+back to `unauthenticated` on error) → `authenticated` →
+`logging_out` → `unauthenticated`.
+
+- Access token stored in `sessionStorage` (not `localStorage`) —
+  survives a page refresh in the same tab, cleared when the tab
+  closes. Deliberate, documented trade-off (see 16.11).
+- `pre_auth_token` (OTP step) held **only in memory**, never
+  persisted — it is short-lived by backend design and only needed
+  within one login attempt.
+- On every page load with a stored token, `GET /auth/me` is called to
+  re-validate the token and fetch canonical identity; a failure clears
+  storage and falls back to `unauthenticated`. The frontend never
+  decodes the JWT or trusts a locally-cached role — `/auth/me` and the
+  `/otp/verify` response are the only sources of role/identity used.
+- Frontend route protection (`ProtectedRoute`, role-based redirects) is
+  explicitly documented in code as a **UX layer only**; the backend's
+  own `require_role` dependency remains the sole authorization
+  boundary.
+
+### 16.8 Routing created
+
+`/login`, `/otp`, `/admin` (roles: Admin, Auditor — see rationale in
+`AppRoutes.tsx`), `/exam-centre` (role: Examination Centre),
+`/unauthorized`, `/` (redirects by role once authenticated), `*` → 404.
+`/admin` and `/exam-centre` render explicit placeholder pages stating
+the module is not yet implemented — no fake dashboard content.
+
+### 16.9 Tests executed and results
+
+```
+npx vitest run
+ Test Files  5 passed (5)
+      Tests  12 passed (12)
+```
+
+Covers: login page render, empty-field validation blocks the API call,
+loading state disables the submit button, backend error message is
+displayed, full login→OTP→authenticated→logout integration flow via
+real `AuthContext`, session restore via stored token, `ProtectedRoute`
+blocking an unauthenticated user, API client's base-URL usage, 401
+error-message extraction, and generic-fallback message on an
+unparsable error body.
+
+### 16.10 Build verification results
+
+| Check | Result |
+|---|---|
+| `npm install` | Succeeded (180 packages) |
+| `npx tsc -b --noEmit` | **0 errors** |
+| `npx vitest run` | **12/12 passed**, 0 failed |
+| `npm run build` (`tsc -b && vite build`) | Succeeded, no warnings (173.88 kB JS / 56.55 kB gzip) |
+| `npm run dev` (manual curl check) | `HTTP 200` at `http://localhost:3000/` |
+| Lint | No lint tool configured in this project yet (none introduced in this phase — out of scope; see 16.13). |
+
+### 16.11 Security decisions / review
+
+- No secrets, passwords, OTPs, JWTs, API keys, or credentials found
+  anywhere in `frontend/` (explicit grep scan performed — see 16.12).
+- No `console.*` call exists anywhere in the frontend source — OTP and
+  password values are never logged, by construction (they simply never
+  reach a logging call).
+- Only `VITE_`-prefixed variables are read by the app
+  (`VITE_API_BASE_URL`); `.env.example` contains no secret value.
+- **Known, documented trade-off**: `sessionStorage` for the access
+  token is vulnerable to XSS exfiltration in principle (as any
+  JS-readable storage is); an httpOnly cookie would be stronger, but
+  the backend does not currently issue one (it returns the JWT in the
+  response body only — `backend/app/schemas/auth.py`). Changing that
+  is a backend design decision out of scope for a frontend-only phase,
+  and is recorded here for a future phase to reconsider rather than
+  silently worked around.
+- `npm audit` (see 16.13) flagged `react-router` (moderate, open
+  redirect via backslash in `<Link>`/`useNavigate`) as still present
+  even at the latest 6.x line (`6.30.6`, installed here); a fix
+  requires the React Router v7 major version. Assessed risk for this
+  phase: **low** — every `<Navigate>`/`useNavigate` target in this
+  codebase is a static string literal, never derived from user input
+  or a URL parameter, so the specific attack (attacker-controlled
+  redirect target) has no exploitable path in the code that exists
+  today. Deferred rather than silently ignored; flagged again in
+  16.13 for Phase 6B+ to reassess once real navigation from
+  user-influenced state (e.g. a "redirect back after login" `?next=`
+  parameter) is ever introduced — at that point this must be revisited
+  before shipping such a feature.
+
+### 16.12 Security scan performed
+
+```
+grep -rniE "password\s*=\s*['\"][^'\"]|api[_-]?key\s*=\s*['\"]|secret\s*=\s*['\"][^'\"]|BEGIN (RSA|EC|PRIVATE) KEY|jwt\s*=\s*['\"]eyJ" frontend/src/
+→ none found
+grep -rn "console\." frontend/src/
+→ no console usage found
+find frontend -name ".env" -o -name ".env.local"
+→ none found (only .env.example is present)
+```
+
+### 16.13 Known limitations (explicit, not hidden)
+
+1. `npm audit`: 7 advisories (5 moderate, 1 high, 1 critical) remain
+   after installing latest compatible versions. The high/critical
+   entries are in `vite`/`esbuild`/`vitest` **dev-only** tooling
+   (dev-server request handling / mock path traversal) — they do not
+   ship in the production `dist/` bundle and only matter if an
+   untrusted party can reach a developer's local `vite dev` server.
+   The moderate `react-router` item is discussed in 16.11. None were
+   silently suppressed; all are recorded here for a deliberate,
+   explicit decision in a later phase (likely bundled with the React
+   Router v7 upgrade Phase 6B or later would need to evaluate anyway).
+2. No ESLint/Prettier configuration was introduced. The brief said "if
+   the project has linting, run it" — none existed, and adding a new
+   lint tool was judged out of scope for a foundation phase versus
+   introducing genuine tooling debt; TypeScript's own `strict` mode
+   (`noUnusedLocals`, `noUnusedParameters`, etc.) is the quality gate
+   used instead. Flagged for Phase 6B+ to decide on explicitly.
+3. If a user refreshes the browser *during* the OTP step (after
+   password success, before OTP entry), the in-memory `pre_auth_token`
+   is lost and they must restart from `/login`. This is a deliberate
+   simplicity trade-off (the backend's `pre_auth_token` is short-lived
+   by design anyway) rather than an oversight, but is recorded as a
+   real UX limitation.
+4. `AppRoutes`'s role→destination mapping (`Auditor` → `/admin`
+   placeholder) is a Phase 6A navigation convenience, not a backend
+   contract — documented inline in `AppRoutes.tsx` and flagged here for
+   Phase 6B to confirm or revise once the Admin Portal's actual
+   per-role views are designed.
+5. No end-to-end (browser + live backend) test was run. All tests
+   mock `fetch`; the dev-server check in 16.10 confirms only that the
+   static app serves and responds, not a live login round-trip against
+   a running backend. This was not claimed as tested.
+6. Hyperledger Fabric / chaincode were **not touched, not tested from
+   the browser, and not exercised in any way** this phase, consistent
+   with the brief.
+
+### 16.14 Backend regression result
+
+```
+cd backend && python3 -m pytest -q --ignore=tests/test_phase2_manual.py
+→ 107 passed, 4 warnings (pre-existing FastAPI on_event deprecation
+  warnings, unrelated to this phase — no backend file was modified)
+```
+
+Identical pass count to the pre-Phase-6A baseline run at the start of
+this session. Zero regressions, because zero backend files changed.
+
+### 16.15 Next phase
+
+**Phase 6B — Admin Portal**, per the checkpoint sequence specified in
+the original brief. Do not start it in this session/checkpoint.
+
+**Phase 6A COMPLETE.**
+**Phase 6B NOT STARTED.**

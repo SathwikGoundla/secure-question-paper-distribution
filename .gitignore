@@ -5,3 +5,9 @@ node_modules/
 dist/
 storage_data/
 *.log
+
+# Frontend
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+frontend/coverage/
