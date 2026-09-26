@@ -1496,3 +1496,450 @@ the original brief. Do not start it in this session/checkpoint.
 
 **Phase 6A COMPLETE.**
 **Phase 6B NOT STARTED.**
+
+---
+
+## 17. PHASE 6B — Admin Portal — COMPLETE (scope reduced by a real backend constraint)
+
+### 17.1 Objective
+
+Build a functional Admin Portal frontend (dashboard shell, question-paper
+management, exam-centre management, audit logs, security events) on top
+of the Phase 6A foundation, using only real, already-existing backend
+endpoints. No backend API was invented, and no data was fabricated.
+
+### 17.2 Mandatory inspection performed before any code was written
+
+Read directly from source (not assumed):
+
+- `backend/app/api/v1/router.py`, `admin.py`, `audit.py`, `papers.py`,
+  `auth.py`, `exam_session.py`, `health.py`
+- `backend/app/api/deps.py` (`CurrentUser`, `get_current_user`, `require_role`)
+- `backend/app/schemas/papers.py`, `schemas/auth.py`
+- `frontend/src/api/client.ts`, `endpoints.ts`
+- `frontend/src/contexts/AuthContext.tsx`, `hooks/useAuth.ts`
+- `frontend/src/routes/AppRoutes.tsx`, `ProtectedRoute.tsx`
+- `frontend/src/components/**`, `frontend/src/pages/placeholder/**`
+- `frontend/src/index.css`, `package.json`, `vite.config.ts`
+- `.gitignore`, `git log`, `git status` (clean at Phase 6A checkpoint `9a77dca`)
+
+**Discrepancy found and recorded here (Section 1's requirement):**
+an empty, untracked directory literally named `frontend/src/{api,components`
+(containing an empty `common,components` subdirectory) was present in
+the extracted Phase 6A ZIP — clearly a leftover from a shell
+brace-expansion `mkdir` typo in a previous session, never committed to
+git (`git ls-files` does not list it; empty directories are never
+tracked by git regardless). It was harmless but was removed as
+housekeeping before starting Phase 6B work. No source file was
+affected.
+
+### 17.3 Critical finding that shaped this phase's real scope
+
+Before writing any frontend code, the actual backend route bodies were
+read (not just their signatures). The result changes what "Phase 6B"
+can honestly mean for this project **today**:
+
+| Backend route | File | Real status |
+|---|---|---|
+| `POST /papers/register` | `papers.py` | **Implemented** (Phase 3-5D) |
+| `GET /papers/{paper_id}` | `papers.py` | **Implemented** |
+| `GET /papers/{paper_id}/status` | `papers.py` | **Implemented** |
+| `POST /papers/{paper_id}/authorize` | `papers.py` | **Implemented** |
+| `GET /papers/{paper_id}/retrieve` | `papers.py` | Implemented (Exam-Centre only; out of scope for the Admin Portal) |
+| `POST /admin/centres` | `admin.py` | **501 stub only** — RBAC real, business logic not written |
+| `PATCH /admin/centres/{id}` | `admin.py` | **501 stub only** |
+| `GET /admin/dashboard/summary` | `admin.py` | **501 stub only** |
+| `GET /admin/exam-security-events` | `admin.py` | **501 stub only** |
+| `GET /audit/logs` | `audit.py` | **501 stub only** |
+| `GET /monitoring/security-events` | `audit.py` | **501 stub only** |
+| `POST /exam-session/violation` | `exam_session.py` | **501 stub only** (Exam-Centre role; not Admin Portal scope anyway) |
+
+Two further, load-bearing facts:
+
+1. **There is no "list all papers" endpoint anywhere in the backend** —
+   not even a stub. `GET /papers/{paper_id}` and
+   `GET /papers/{paper_id}/status` are both single-paper lookups keyed
+   by a UUID the caller must already know.
+2. **There is no "list examination centres" endpoint anywhere in the
+   backend** — not even a stub. Only `POST /admin/centres` (create,
+   501) and `PATCH /admin/centres/{id}` (update, 501) exist.
+
+Per the project's explicit rules ("Do NOT invent backend APIs," "Do
+NOT fabricate data," "If a required admin operation genuinely cannot
+be implemented because the backend does not expose it, document the
+limitation instead of inventing data"), this phase does **not** build
+a fake paper table, a fake exam-centre CRUD screen, fake audit-log
+rows, or fake security events. What was built instead is documented
+below, page by page, together with exactly which parts are real and
+which are honestly labelled as not-yet-available.
+
+### 17.4 What was implemented (real, working, backend-verified)
+
+**Admin Portal shell** (`components/admin/AdminLayout.tsx`): header
+(reused from Phase 6A `AppHeader`, unchanged) + a role-aware sidebar +
+content outlet. Sidebar links are filtered by the signed-in user's
+role using the *exact* RBAC matrix read from the backend's
+`require_role(...)` calls (Admin sees all five sections; Auditor sees
+only Dashboard, Audit Logs, Security Events — matching the backend,
+which denies Auditor on papers/admin-centres endpoints). This is
+documented in code as a UX convenience only; the backend independently
+enforces every one of these checks regardless of what the sidebar
+shows.
+
+**Dashboard** (`pages/admin/AdminDashboardPage.tsx`): shows the signed-
+in user's identity/role (real, from `AuthContext`), a session-local
+count of papers seen so far, and, for Admin only, a real call to
+`GET /admin/dashboard/summary` whose (currently 501) response is
+surfaced honestly via `NotYetAvailableNotice` rather than hidden. No
+chart, count, or statistic is fabricated. Auditor does not see this
+card (backend denies Auditor on this endpoint).
+
+**Question Papers** (`pages/admin/papers/PapersPage.tsx`,
+`PaperUploadPage.tsx`, `PaperDetailPage.tsx`):
+- **Upload** — a real multipart form calling `POST /papers/register`
+  exactly as the backend defines it (`subject` + `release_timestamp`
+  form fields, `file` as the raw PDF). All required UI states are
+  implemented: Idle, Uploading (button disabled + "Please wait…"),
+  Success (with the real `status`/`ledger_tx_reference` fields shown),
+  Validation Error (empty fields, or backend 400/422), Authentication
+  Error (401/403), Server Error (5xx), Network Error (client-side
+  fetch failure). No encryption happens in the browser — the backend
+  performs AES-256/SHA-256/Fabric registration entirely server-side,
+  exactly as LLD Section 12/13 specifies.
+- **Lookup / list** — because no list-all endpoint exists, this page
+  is explicit about the constraint (visible note on the page) and
+  offers: (a) a session-scoped table of papers the current admin has
+  genuinely seen via real API responses this session (register or
+  lookup — persisted only in `sessionStorage` via the new
+  `useKnownPapers` hook, never fabricated), and (b) a real "look up by
+  ID" form against `GET /papers/{paper_id}`.
+- **Detail** — combines the real `GET /papers/{paper_id}` and
+  `GET /papers/{paper_id}/status` responses (subject, status, SHA-256
+  hash, release time, created time — exactly the fields
+  `PaperMetadataResponse`/`PaperStatusResponse` return, nothing more),
+  plus a real `POST /papers/{paper_id}/authorize` form. Because there
+  is no centre-listing endpoint either, the examination-centre ID must
+  be entered directly — the page says so rather than presenting a
+  fake dropdown.
+
+**Exam Centres** (`pages/admin/centres/ExamCentresPage.tsx`): per
+17.3, this is a static, honest limitation notice — it does **not**
+call `POST /admin/centres` on page load (that would be misusing a
+"create" endpoint as a side effect of merely viewing a page) and does
+**not** present a form for an operation that can never succeed. It
+states plainly which two endpoints exist, that both are 501 stubs, and
+that no listing endpoint exists at all.
+
+**Audit Logs** (`pages/admin/audit/AuditLogsPage.tsx`) and **Security
+Events** (`pages/admin/security/SecurityEventsPage.tsx`): both make
+the real `GET` call on page load (a safe, idempotent read, unlike the
+centres case), show a loading state, and then render the backend's own
+501 response message via a shared `NotYetAvailableNotice` component —
+or a genuine error banner if some other failure occurs. Both are
+reachable by Admin and Auditor, matching the backend's
+`require_role("Admin", "Auditor")`.
+
+**Client extensions** (`api/client.ts`): two small, additive changes
+only, per the brief's "modify the existing client cleanly" guidance —
+no competing client was created:
+1. `extractErrorMessage` now also recognizes the plain
+   `{"detail": "..."}` body shape the 501 stub endpoints return
+   (they never raise an `AppException`, so they never produce the
+   app's usual `{"error": {"message": ...}}` shape) — without this,
+   the backend's real "not implemented yet" message would have been
+   silently replaced with a generic fallback string.
+2. A new `apiRequestMultipart` function, a thin sibling of the
+   existing `apiRequest`, for the one endpoint
+   (`POST /papers/register`) that genuinely requires
+   `multipart/form-data` rather than JSON. It reuses the same base
+   URL, timeout, auth-token, and error-extraction logic — nothing is
+   duplicated.
+
+### 17.5 Routing added
+
+```
+/admin              (index)                 -> AdminDashboardPage        [Admin, Auditor]
+/admin/papers                                -> PapersPage                [Admin only]
+/admin/papers/upload                         -> PaperUploadPage           [Admin only]
+/admin/papers/:paperId                       -> PaperDetailPage           [Admin only]
+/admin/exam-centres                          -> ExamCentresPage           [Admin only]
+/admin/audit-logs                            -> AuditLogsPage             [Admin, Auditor]
+/admin/security-events                       -> SecurityEventsPage       [Admin, Auditor]
+```
+
+All nested under the existing `/admin` `ProtectedRoute` (unchanged
+`allowedRoles={["Admin", "Auditor"]}`), now rendering `AdminLayout`
+(sidebar + `<Outlet/>`) instead of the Phase 6A `AdminPlaceholderPage`.
+Admin-only nested routes carry an additional inner `ProtectedRoute`
+restricting them to `Admin`, matching the backend's own per-endpoint
+RBAC. `/exam-centre` (Examination Centre placeholder) is untouched —
+out of scope for this phase. `AdminPlaceholderPage.tsx` itself was
+**left in place, unmodified, just no longer referenced by any route**
+(per "do not remove previous functionality" — nothing was deleted).
+
+### 17.6 Files created
+
+```
+frontend/src/types/papers.ts
+frontend/src/components/admin/AdminLayout.tsx
+frontend/src/components/admin/NotYetAvailableNotice.tsx
+frontend/src/components/common/EmptyState.tsx
+frontend/src/hooks/useKnownPapers.ts
+frontend/src/pages/admin/AdminDashboardPage.tsx
+frontend/src/pages/admin/AdminPortal.integration.test.tsx
+frontend/src/pages/admin/papers/PapersPage.tsx
+frontend/src/pages/admin/papers/PaperUploadPage.tsx
+frontend/src/pages/admin/papers/PaperDetailPage.tsx
+frontend/src/pages/admin/centres/ExamCentresPage.tsx
+frontend/src/pages/admin/audit/AuditLogsPage.tsx
+frontend/src/pages/admin/security/SecurityEventsPage.tsx
+```
+
+### 17.7 Files modified
+
+```
+frontend/src/api/client.ts       (extractErrorMessage `detail` fallback; apiRequestMultipart added)
+frontend/src/api/endpoints.ts    (papers/admin/audit endpoint wrappers added)
+frontend/src/routes/AppRoutes.tsx (nested /admin/* routes; AdminPlaceholderPage import removed, file kept)
+frontend/src/index.css           (Admin Portal shell/table/form/notice styles added, nothing removed)
+frontend/src/test/testUtils.tsx  (seedAuthenticatedSession, routedFetchMock helpers added)
+PROJECT_STATE.md                 (this section)
+```
+
+**No backend file was modified.** Confirmed by `git status` showing
+zero changes under `backend/` after this phase's work.
+
+### 17.8 Backend APIs consumed (all real, verified against source)
+
+```
+POST /api/v1/papers/register
+GET  /api/v1/papers/{paper_id}
+GET  /api/v1/papers/{paper_id}/status
+POST /api/v1/papers/{paper_id}/authorize
+GET  /api/v1/admin/dashboard/summary   (real call; currently 501)
+GET  /api/v1/audit/logs                (real call; currently 501)
+GET  /api/v1/monitoring/security-events (real call; currently 501)
+```
+
+`createCentre()` (`POST /admin/centres`) was wrapped in `endpoints.ts`
+for completeness/documentation but is **not called** anywhere in the
+UI, for the reason given in 17.3/17.4 (ExamCentresPage).
+
+### 17.9 Authentication / RBAC behaviour
+
+Unchanged from Phase 6A: the backend remains the sole authorization
+boundary; `ProtectedRoute` and the sidebar's role filtering are UX
+layers only. Every new page still goes through the same
+`AuthContext`/`apiRequest` machinery — no second authentication system
+was introduced, and the bearer token is never read, copied, or logged
+by any new code.
+
+### 17.10 Upload behaviour
+
+See 17.4. States implemented: Idle, Uploading, Success, Validation
+Error, Authentication Error, Server Error, Network Error — all seven
+named in the brief. `ApiError.status` (already provided by the Phase
+6A client) is used to distinguish them; `status === null` is the
+client's own signal for a network/timeout failure (see `client.ts`).
+
+### 17.11 Exam-centre management behaviour
+
+Not implemented as a working feature, by design — see 17.3/17.4. This
+is a documented limitation, not an oversight.
+
+### 17.12 Audit-log behaviour
+
+Real `GET /audit/logs` call; backend's real 501 message surfaced. No
+audit records are fabricated. No filtering UI was built (the backend
+doesn't support any filter parameters yet either — `audit.py` takes no
+query parameters).
+
+### 17.13 Security-event behaviour
+
+Same pattern as audit logs, calling `GET /monitoring/security-events`.
+No AI/insider-threat detection was added (explicitly out of scope per
+the project brief).
+
+### 17.14 Tests
+
+New file: `frontend/src/pages/admin/AdminPortal.integration.test.tsx`
+(14 tests), covering:
+
+- Admin dashboard renders for an authenticated Admin (17.4)
+- Auditor does not see Question Papers / Exam Centres nav links
+- Examination Centre role is blocked from `/admin/papers` (RBAC)
+- Unauthenticated user hitting `/admin` is redirected to `/login`
+- Question Papers empty state renders with no known papers
+- Paper lookup by ID succeeds and navigates to the detail page
+- Paper lookup shows a real 404 error message for an unknown ID
+- Upload form renders (subject, release time, file, submit button)
+- Upload validation error when required fields are missing
+- Upload shows an authentication-error message on a 401 response
+- Exam Centres page shows the documented limitation, not a fake form
+- Audit Logs page surfaces the backend's real 501 message
+- Security Events page shows a generic error banner for a non-501 failure
+- Auditor can reach Audit Logs and Security Events (role permitted)
+
+Combined with the 12 pre-existing Phase 6A tests (all still passing,
+unmodified in behaviour), the full suite is:
+
+```
+npx vitest run
+ Test Files  6 passed (6)
+      Tests  26 passed (26)
+```
+
+**Coverage honestly stated**: this is a representative subset of the
+Section 18 test list in the Phase 6B brief, not an exhaustive
+one-test-per-bullet implementation (e.g. there is no dedicated
+"loading state" unit test for every single page in isolation — several
+pages share the same loading/error/empty pattern already exercised at
+least once above). Given the backend-imposed scope reduction (17.3),
+several of the brief's originally-listed test bullets (e.g. "successful
+upload is handled" end-to-end with a real created row visible in a
+list, or "supported management operations work" for exam centres) do
+not have a corresponding real feature to test against yet.
+
+### 17.15 TypeScript result
+
+```
+npx tsc -b --noEmit
+→ 0 errors
+```
+
+### 17.16 Production build result
+
+```
+npm run build
+✓ 64 modules transformed
+dist/assets/index-*.js   189.50 kB (gzip: 60.60 kB)
+dist/assets/index-*.css    6.39 kB (gzip:  1.79 kB)
+✓ built in 1.94s
+```
+
+### 17.17 Security scan result
+
+```
+grep -rniE "password\s*=\s*['\"][^'\"]|api[_-]?key\s*=\s*['\"]|secret\s*=\s*['\"][^'\"]|BEGIN (RSA|EC|PRIVATE) KEY|jwt\s*=\s*['\"]eyJ" frontend/src/
+→ none found
+grep -rn "console\." frontend/src/
+→ none found
+find frontend -name ".env" -o -name ".env.local"
+→ none found
+git status --porcelain | grep -E "node_modules|dist/"
+→ none found
+```
+
+No secrets, API keys, private keys, JWT literals, or `console.*` calls
+were introduced. The AES key, wrapped DEK, and nonce continue to never
+appear in any response type or component — verified again by re-
+reading `backend/app/schemas/papers.py` and matching `types/papers.ts`
+field-for-field.
+
+### 17.18 Browser verification result
+
+**Partial, honestly stated**: `npm run dev -- --port 3000 --strictPort`
+was started and `curl http://localhost:3000/` returned `HTTP 200` with
+the expected Vite-injected HTML shell — the same level of verification
+Phase 6A itself performed and documented (16.10). **No actual
+headless-or-real browser navigation of `/login`, `/otp`, `/admin`, or
+any Admin Portal page was performed in this sandbox** (no browser
+automation tool was available in this environment). This is not
+claimed as done. All 26 automated tests do exercise real rendered
+component trees via `@testing-library/react` + `jsdom`, which is a
+meaningfully different (and narrower) form of verification than an
+actual browser.
+
+### 17.19 Backend regression result
+
+```
+cd backend && python -m pytest -q --ignore=tests/test_phase2_manual.py
+→ 107 passed, 4 warnings (same pre-existing FastAPI on_event
+  deprecation warnings as every prior phase — no backend file was
+  modified this phase)
+```
+
+Identical pass count to the pre-Phase-6B baseline re-run at the start
+of this session. Zero regressions, because zero backend files changed.
+
+### 17.20 Known limitations (explicit, not hidden)
+
+1. **Exam-centre management is not a working feature.** The backend
+   has no list-centres endpoint at all, and its create/update
+   endpoints are 501 stubs. This is the single biggest scope gap
+   versus the original Phase 6B brief, and it is a backend gap, not a
+   frontend oversight (see 17.3).
+2. **Question-paper "list all papers" does not exist.** The Question
+   Papers page's table is a session-local cache of papers the admin
+   has personally registered or looked up, not a real catalogue. This
+   is disclosed directly on the page, not hidden in a tooltip.
+3. **Audit Logs and Security Events pages have no data to show even
+   when "successful"** — the backend endpoints are 501 stubs, so there
+   is currently no way to demonstrate a populated audit table or event
+   list from this phase alone. The pages are built and wired
+   correctly; they will render whatever the backend eventually returns
+   once that phase's business logic exists (their `.catch` branches
+   already stop treating 501 as an error once a future response no
+   longer carries that status).
+4. Dashboard shows no aggregate paper/centre counts, because no such
+   backend endpoint exists (`/admin/dashboard/summary` is a 501 stub)
+   and no list endpoint exists to derive counts from client-side.
+5. `authorizeCentre` requires the operator to already know a valid
+   examination-centre UUID (no picker/autocomplete is possible without
+   a list endpoint). This is stated on the page itself.
+6. No browser-level (real or headless) navigation test was performed —
+   see 17.18. Only `jsdom`-based component tests and a dev-server
+   HTTP-200 curl check were run.
+7. Test coverage is a representative subset of the Section 18 test
+   list in the brief, not one test per bullet — see 17.14's honest
+   accounting of what is and is not covered.
+8. `npm audit` advisories carried over unchanged from Phase 6A (dev-
+   only `vite`/`esbuild`/`vitest` tooling; the `react-router` open-
+   redirect item, still not exploitable in this codebase because no
+   `<Navigate>`/`useNavigate` target is ever derived from user input —
+   this remains true after Phase 6B, since every new redirect target
+   added in this phase, e.g. `navigate(`/admin/papers/${paperId}`)`
+   from `PapersPage`, is built from a value the backend itself
+   returned for a paper the caller just successfully looked up or
+   registered via an authenticated, RBAC-checked call — not from a raw
+   attacker-controlled URL parameter).
+9. The stray empty `frontend/src/{api,components...}` directory found
+   during inspection (17.2) was removed as housekeeping; it was never
+   tracked by git and had no effect on any prior phase's tests/build.
+
+### 17.21 Decisions made (explicit, not silently assumed)
+
+- Built the Admin Portal around the backend's real capabilities rather
+  than deferring the entire phase or building non-functional UI for
+  the 501-stub-only areas (exam centres). This was judged the better
+  reading of the brief's own instruction to "implement only that
+  subset" the backend supports, extended to the same principle for
+  audit/security (page exists, makes the real call, shows the real
+  501 honestly) versus exam centres (no safe idempotent call exists to
+  make on page load, so a static notice was used instead).
+- Session-scoped "known papers" cache (`sessionStorage`, not
+  persisted server-side) is a Phase 6B UX decision, not a backend
+  contract — clearly labelled as such in code and on the page.
+- `release_timestamp` is converted from the browser's local
+  `datetime-local` value to an explicit UTC ISO string
+  (`new Date(...).toISOString()`) before sending, so a time-lock
+  security control is never silently subject to timezone ambiguity
+  between the browser and the backend.
+
+### 17.22 Next phase
+
+**Phase 6C — NOT STARTED.**
+
+Recommended next steps, in order:
+1. Project-owner review of the backend-scope gaps in 17.3/17.20 —
+   confirm whether Phase 6C should implement the missing backend
+   business logic (centre CRUD + list, dashboard summary, audit/
+   security-event retrieval) before or alongside further frontend work,
+   since several Admin Portal pages built in this phase are currently
+   waiting on that backend work rather than any further frontend
+   effort.
+2. Per the original brief: do not start Phase 6C in this
+   session/checkpoint.
+
+**Phase 6B: COMPLETE.**
+**Phase 6C: NOT STARTED.**

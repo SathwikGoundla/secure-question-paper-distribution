@@ -59,15 +59,83 @@ interface RequestOptions {
 }
 
 /**
+ * Phase 6B addition: the paper-registration endpoint
+ * (POST /papers/register, backend/app/api/v1/papers.py) accepts
+ * `multipart/form-data` (FastAPI `Form(...)` + `File(...)` parameters),
+ * not JSON — the existing `apiRequest` only ever sends
+ * `application/json`. Rather than duplicating request/timeout/error
+ * handling, this is a thin sibling that reuses the same base URL,
+ * timeout, auth-token, and error-extraction logic. The browser sets
+ * the `Content-Type: multipart/form-data; boundary=...` header itself
+ * when given a `FormData` body — it must never be set manually.
+ */
+export async function apiRequestMultipart<TResponse>(
+  path: string,
+  formData: FormData,
+  options: { method?: "POST" | "PATCH" | "PUT" } = {},
+): Promise<TResponse> {
+  const { method = "POST" } = options;
+
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      method,
+      headers,
+      body: formData,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError(TIMEOUT_ERROR_MESSAGE, null);
+    }
+    throw new ApiError(NETWORK_ERROR_MESSAGE, null);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    const message = await extractErrorMessage(response);
+    throw new ApiError(message, response.status);
+  }
+
+  if (response.status === 204) {
+    return undefined as TResponse;
+  }
+  return (await response.json()) as TResponse;
+}
+
+/**
  * Extracts a safe, user-facing message from a non-2xx response.
  * Falls back to a generic, non-leaking message if the body is not the
  * expected shape (e.g. a proxy/timeout error page, not JSON at all).
  */
 async function extractErrorMessage(response: Response): Promise<string> {
   try {
-    const body = (await response.json()) as Partial<BackendErrorBody>;
+    const body = (await response.json()) as Partial<BackendErrorBody> & { detail?: unknown };
     if (body?.error?.message) {
       return body.error.message;
+    }
+    // Phase 6B addition: a small number of backend endpoints
+    // (app/api/v1/admin.py, audit.py, exam_session.py) are still
+    // intentional 501 stubs. They return a plain FastAPI dict body
+    // `{"detail": "..."}` rather than the app's own AppException shape
+    // (backend/app/exceptions/handlers.py), because they never raise
+    // an AppException — they just `return {"detail": ...}` directly.
+    // Surfacing that real backend message (instead of falling through
+    // to a generic "unable to complete request" string) lets the Admin
+    // Portal tell the user honestly that a feature is not yet
+    // implemented on the backend, rather than implying a transient
+    // failure. This is the only change made to this function.
+    if (typeof body?.detail === "string" && body.detail.length > 0) {
+      return body.detail;
     }
   } catch {
     // Response body was not valid JSON — fall through to the generic fallback.

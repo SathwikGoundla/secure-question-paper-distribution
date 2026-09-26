@@ -1,9 +1,9 @@
 {
   "name": "qpaper-frontend",
   "private": true,
-  "version": "0.1.0-phase6a",
+  "version": "0.2.0-phase6b",
   "type": "module",
-  "description": "Frontend foundation for the Blockchain-Enabled Secure Question Paper Distribution Framework. Phase 6A: foundation only (auth + routing shell). See README.md.",
+  "description": "Frontend for the Blockchain-Enabled Secure Question Paper Distribution Framework. Phase 6B: Admin Portal (dashboard, question-paper register/lookup/authorize, exam-centres/audit/security limitation pages). See README.md and PROJECT_STATE.md.",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

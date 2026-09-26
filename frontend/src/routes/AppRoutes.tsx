@@ -3,11 +3,18 @@ import { useAuth } from "../hooks/useAuth";
 import { ProtectedRoute } from "./ProtectedRoute";
 import { LoginPage } from "../pages/auth/LoginPage";
 import { OTPPage } from "../pages/auth/OTPPage";
-import { AdminPlaceholderPage } from "../pages/placeholder/AdminPlaceholderPage";
 import { ExamCentrePlaceholderPage } from "../pages/placeholder/ExamCentrePlaceholderPage";
 import { UnauthorizedPage } from "../pages/errors/UnauthorizedPage";
 import { NotFoundPage } from "../pages/errors/NotFoundPage";
 import { LoadingIndicator } from "../components/common/LoadingIndicator";
+import { AdminLayout } from "../components/admin/AdminLayout";
+import { AdminDashboardPage } from "../pages/admin/AdminDashboardPage";
+import { PapersPage } from "../pages/admin/papers/PapersPage";
+import { PaperUploadPage } from "../pages/admin/papers/PaperUploadPage";
+import { PaperDetailPage } from "../pages/admin/papers/PaperDetailPage";
+import { ExamCentresPage } from "../pages/admin/centres/ExamCentresPage";
+import { AuditLogsPage } from "../pages/admin/audit/AuditLogsPage";
+import { SecurityEventsPage } from "../pages/admin/security/SecurityEventsPage";
 
 /**
  * Sends an authenticated user to the section matching their role.
@@ -48,10 +55,46 @@ export function AppRoutes() {
         path="/admin"
         element={
           <ProtectedRoute allowedRoles={["Admin", "Auditor"]}>
-            <AdminPlaceholderPage />
+            <AdminLayout />
           </ProtectedRoute>
         }
-      />
+      >
+        <Route index element={<AdminDashboardPage />} />
+        <Route
+          path="papers"
+          element={
+            <ProtectedRoute allowedRoles={["Admin"]}>
+              <PapersPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="papers/upload"
+          element={
+            <ProtectedRoute allowedRoles={["Admin"]}>
+              <PaperUploadPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="papers/:paperId"
+          element={
+            <ProtectedRoute allowedRoles={["Admin"]}>
+              <PaperDetailPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="exam-centres"
+          element={
+            <ProtectedRoute allowedRoles={["Admin"]}>
+              <ExamCentresPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route path="audit-logs" element={<AuditLogsPage />} />
+        <Route path="security-events" element={<SecurityEventsPage />} />
+      </Route>
       <Route
         path="/exam-centre"
         element={
