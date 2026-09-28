@@ -14,7 +14,7 @@ already established by schemas/auth.py.
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PaperRegisterResponse(BaseModel):
@@ -47,6 +47,37 @@ class PaperStatusResponse(BaseModel):
     paper_id: uuid.UUID
     status: str
     release_timestamp: datetime
+
+
+class PaperListItemResponse(BaseModel):
+    """
+    Phase 6C addition — one row of GET /papers (list). Field set is
+    deliberately identical to PaperMetadataResponse PLUS
+    ledger_tx_reference, which is safe to expose (it is a public-style
+    ledger transaction identifier, not a secret — see PaperRegisterResponse,
+    which already exposes it) and is explicitly called out as allowed
+    for the paper list by the Phase 6C brief (Section 11). Never
+    file_nonce, wrapped_dek, or file_reference (internal storage path).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    paper_id: uuid.UUID
+    subject: str
+    status: str
+    sha256_hash: str
+    release_timestamp: datetime
+    created_at: datetime
+    ledger_tx_reference: str | None = None
+
+
+class PaperListResponse(BaseModel):
+    """Phase 6C addition — paginated envelope for GET /papers."""
+
+    items: list[PaperListItemResponse]
+    total: int
+    page: int
+    page_size: int
 
 
 class PaperAuthorizeRequest(BaseModel):

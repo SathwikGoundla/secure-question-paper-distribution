@@ -274,6 +274,27 @@ def exam_centre_principal(client, db_session, monkeypatch) -> TestPrincipal:
     )
 
 
+@pytest.fixture()
+def auditor_principal(client, db_session, monkeypatch) -> TestPrincipal:
+    """
+    Phase 6C addition. Auditor (LLD Section 15: read-only audit/
+    security-monitoring access) — needed to test GET /audit/logs and
+    GET /monitoring/security-events, which are Admin-OR-Auditor per
+    the existing (Phase 2, unmodified) RBAC wiring in
+    app/api/v1/audit.py.
+    """
+    role = _get_or_create_role(db_session, "Auditor")
+    username = f"auditor_{uuid.uuid4().hex[:8]}"
+    password = "Test-Auditor-Password-123!"
+    user = User(username=username, password_hash=hash_password(password), role_id=role.role_id)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    token = _login_and_capture_token(client, monkeypatch, username, password)
+    return TestPrincipal(user_id=user.user_id, username=username, password=password, access_token=token)
+
+
 def auth_header(principal: TestPrincipal) -> dict:
     return {"Authorization": f"Bearer {principal.access_token}"}
 

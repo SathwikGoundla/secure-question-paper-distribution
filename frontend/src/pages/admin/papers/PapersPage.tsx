@@ -1,30 +1,51 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { getPaperMetadata } from "../../../api/endpoints";
+import { listPapers, getPaperMetadata } from "../../../api/endpoints";
 import { ApiError } from "../../../types/api";
+import type { PaperListItemResponse } from "../../../types/papers";
 import { useKnownPapers } from "../../../hooks/useKnownPapers";
 import { Button } from "../../../components/common/Button";
 import { Input } from "../../../components/common/Input";
 import { ErrorBanner } from "../../../components/common/ErrorBanner";
 import { EmptyState } from "../../../components/common/EmptyState";
+import { LoadingIndicator } from "../../../components/common/LoadingIndicator";
 
 /**
- * The backend has no "list all papers" endpoint (verified during
- * Phase 6B inspection — backend/app/api/v1/papers.py exposes only
- * register / get-by-id / authorize / retrieve / status, all keyed by
- * a specific paper_id). This page is honest about that limitation: it
- * shows papers the current admin has genuinely seen this session
- * (registered or looked up — real backend responses, cached
- * client-side by useKnownPapers) plus a "look up by ID" form backed
- * by the real GET /papers/{paper_id} endpoint.
+ * GET /api/v1/papers (Phase 6C addition — see PROJECT_STATE.md) now
+ * provides a real paper catalogue: every paper the current Admin (or,
+ * for an Examination Centre, every paper it is currently authorized
+ * for) can see. The "look up by ID" form is kept for the common case
+ * of navigating straight to a specific paper's detail page.
  */
 export function PapersPage() {
-  const { papers, remember } = useKnownPapers();
+  const { remember } = useKnownPapers();
   const navigate = useNavigate();
+
+  const [papers, setPapers] = useState<PaperListItemResponse[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [paperId, setPaperId] = useState("");
   const [lookupError, setLookupError] = useState<string | null>(null);
   const [isLookingUp, setIsLookingUp] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    listPapers({ pageSize: 100 })
+      .then((data) => {
+        if (!cancelled) setPapers(data.items);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setLoadError(err instanceof ApiError ? err.userMessage : "Unable to load question papers.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function handleLookup(event: FormEvent) {
     event.preventDefault();
@@ -62,12 +83,6 @@ export function PapersPage() {
         </Link>
       </div>
 
-      <p className="admin-page-note">
-        The backend does not currently provide a way to list every registered paper — only
-        single-paper lookup by ID (GET /papers/{"{paper_id}"}). The list below shows papers you have
-        registered or looked up in this session; it is not a complete catalogue.
-      </p>
-
       <form className="lookup-form" onSubmit={handleLookup}>
         <Input
           id="paper-id-lookup"
@@ -82,10 +97,13 @@ export function PapersPage() {
         </Button>
       </form>
 
-      <h2 className="admin-section-heading">Papers seen this session</h2>
-      {papers.length === 0 ? (
+      <h2 className="admin-section-heading">All question papers</h2>
+      {loading && <LoadingIndicator label="Loading question papers…" />}
+      {!loading && loadError && <ErrorBanner message={loadError} />}
+      {!loading && !loadError && papers.length === 0 && (
         <EmptyState message="No question papers found. Register a paper or look one up by ID." />
-      ) : (
+      )}
+      {!loading && !loadError && papers.length > 0 && (
         <table className="admin-table">
           <thead>
             <tr>

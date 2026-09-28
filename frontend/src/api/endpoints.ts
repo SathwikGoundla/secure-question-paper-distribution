@@ -22,10 +22,20 @@ import type {
   NotImplementedResponse,
   PaperAuthorizeRequest,
   PaperAuthorizeResponse,
+  PaperListResponse,
   PaperMetadataResponse,
   PaperRegisterResponse,
   PaperStatusResponse,
 } from "../types/papers";
+import type {
+  CentreCreateRequest,
+  CentreListResponse,
+  CentreResponse,
+  CentreUpdateRequest,
+  DashboardSummaryResponse,
+} from "../types/admin";
+import type { AuditLogListResponse } from "../types/audit";
+import type { SecurityEventListResponse } from "../types/monitoring";
 
 /** POST /api/v1/auth/login — first factor (username + password). */
 export function login(payload: LoginRequest): Promise<LoginResponse> {
@@ -82,6 +92,22 @@ export function registerPaper(params: {
 }
 
 /**
+ * GET /api/v1/papers — Phase 6C addition. Not a separately numbered
+ * LLD API; see backend/app/api/v1/papers.py `list_papers` and
+ * PROJECT_STATE.md's Phase 6C section for why it exists. Admin sees
+ * every paper; Examination Centre sees only papers it is currently
+ * authorized for.
+ */
+export function listPapers(params: { page?: number; pageSize?: number; status?: string } = {}): Promise<PaperListResponse> {
+  const query = new URLSearchParams();
+  if (params.page) query.set("page", String(params.page));
+  if (params.pageSize) query.set("page_size", String(params.pageSize));
+  if (params.status) query.set("status", params.status);
+  const qs = query.toString();
+  return apiRequest<PaperListResponse>(`/papers${qs ? `?${qs}` : ""}`, { method: "GET" });
+}
+
+/**
  * GET /api/v1/papers/{paper_id} — Admin (any paper) or Examination
  * Centre (only if authorized for this paper) (LLD API-05). Returns
  * non-sensitive metadata only — never the encrypted file, key material,
@@ -103,12 +129,7 @@ export function getPaperStatus(paperId: string): Promise<PaperStatusResponse> {
 /**
  * POST /api/v1/papers/{paper_id}/authorize — Admin-only (LLD API-06).
  * Grants a specific examination centre (by its UUID) permission to
- * retrieve this specific paper. The backend does not currently expose
- * any endpoint to list existing examination-centre records (see
- * `exam-centres` limitation, Section 8 of the Phase 6B prompt and
- * PROJECT_STATE.md Section 17), so the centre UUID must be entered
- * directly — this UI does not invent a centre picker backed by data
- * the backend cannot supply.
+ * retrieve this specific paper.
  */
 export function authorizeCentre(
   paperId: string,
@@ -120,35 +141,81 @@ export function authorizeCentre(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6C — real business logic. Every route below was a 501 stub as of
+// Phase 6B; app/api/v1/admin.py and audit.py now implement real,
+// RBAC-protected, database-backed behaviour (see PROJECT_STATE.md's
+// Phase 6C section for the exact backend inspection performed).
+// ---------------------------------------------------------------------------
+
+/** GET /api/v1/admin/centres — Admin-only (LLD 7.3 list). */
+export function listCentres(params: { page?: number; pageSize?: number } = {}): Promise<CentreListResponse> {
+  const query = new URLSearchParams();
+  if (params.page) query.set("page", String(params.page));
+  if (params.pageSize) query.set("page_size", String(params.pageSize));
+  const qs = query.toString();
+  return apiRequest<CentreListResponse>(`/admin/centres${qs ? `?${qs}` : ""}`, { method: "GET" });
+}
+
+/** GET /api/v1/admin/centres/{centre_id} — Admin-only. */
+export function getCentre(centreId: string): Promise<CentreResponse> {
+  return apiRequest<CentreResponse>(`/admin/centres/${centreId}`, { method: "GET" });
+}
+
+/** POST /api/v1/admin/centres — Admin-only (LLD API-11). */
+export function createCentre(body: CentreCreateRequest): Promise<CentreResponse> {
+  return apiRequest<CentreResponse>("/admin/centres", { method: "POST", body });
+}
+
+/** PATCH /api/v1/admin/centres/{centre_id} — Admin-only (LLD API-12). */
+export function updateCentre(centreId: string, body: CentreUpdateRequest): Promise<CentreResponse> {
+  return apiRequest<CentreResponse>(`/admin/centres/${centreId}`, { method: "PATCH", body });
+}
+
+/** GET /api/v1/admin/dashboard/summary — Admin-only (LLD API-13). Real, database-derived aggregates. */
+export function getDashboardSummary(): Promise<DashboardSummaryResponse> {
+  return apiRequest<DashboardSummaryResponse>("/admin/dashboard/summary", { method: "GET" });
+}
+
+/** GET /api/v1/audit/logs — Admin or Auditor (LLD API-09). */
+export function getAuditLogs(
+  params: {
+    page?: number;
+    pageSize?: number;
+    paperId?: string;
+    eventType?: string;
+    outcome?: string;
+  } = {},
+): Promise<AuditLogListResponse> {
+  const query = new URLSearchParams();
+  if (params.page) query.set("page", String(params.page));
+  if (params.pageSize) query.set("page_size", String(params.pageSize));
+  if (params.paperId) query.set("paper_id", params.paperId);
+  if (params.eventType) query.set("event_type", params.eventType);
+  if (params.outcome) query.set("outcome", params.outcome);
+  const qs = query.toString();
+  return apiRequest<AuditLogListResponse>(`/audit/logs${qs ? `?${qs}` : ""}`, { method: "GET" });
+}
+
+/** GET /api/v1/monitoring/security-events — Admin or Auditor (LLD API-10). */
+export function getSecurityEvents(
+  params: { page?: number; pageSize?: number; severity?: string; eventType?: string } = {},
+): Promise<SecurityEventListResponse> {
+  const query = new URLSearchParams();
+  if (params.page) query.set("page", String(params.page));
+  if (params.pageSize) query.set("page_size", String(params.pageSize));
+  if (params.severity) query.set("severity", params.severity);
+  if (params.eventType) query.set("event_type", params.eventType);
+  const qs = query.toString();
+  return apiRequest<SecurityEventListResponse>(`/monitoring/security-events${qs ? `?${qs}` : ""}`, {
+    method: "GET",
+  });
+}
+
 /**
- * The four endpoints below (backend/app/api/v1/admin.py, audit.py)
- * are real, RBAC-protected routes — authentication and role checks
- * are genuinely enforced — but their business logic has not been
- * implemented yet: every one of them returns HTTP 501 with a plain
- * `{"detail": "..."}` body (verified directly in the route source,
- * not assumed). They are still wrapped here, rather than skipped,
- * so the Admin Portal can make the real call, receive the real 501,
- * and surface the backend's own "not implemented yet" message via
- * the standard ApiError path instead of a page that silently pretends
- * the feature exists by faking a request.
+ * GET /api/v1/admin/exam-security-events — LLD API-15 (Faculty-Review
+ * Addition). Still a genuine 501 stub — out of Phase 6C's scope.
  */
-
-/** POST /api/v1/admin/centres — Admin-only. Currently a 501 stub. */
-export function createCentre(): Promise<NotImplementedResponse> {
-  return apiRequest<NotImplementedResponse>("/admin/centres", { method: "POST" });
-}
-
-/** GET /api/v1/admin/dashboard/summary — Admin-only. Currently a 501 stub. */
-export function getDashboardSummary(): Promise<NotImplementedResponse> {
-  return apiRequest<NotImplementedResponse>("/admin/dashboard/summary", { method: "GET" });
-}
-
-/** GET /api/v1/audit/logs — Admin or Auditor. Currently a 501 stub. */
-export function getAuditLogs(): Promise<NotImplementedResponse> {
-  return apiRequest<NotImplementedResponse>("/audit/logs", { method: "GET" });
-}
-
-/** GET /api/v1/monitoring/security-events — Admin or Auditor. Currently a 501 stub. */
-export function getSecurityEvents(): Promise<NotImplementedResponse> {
-  return apiRequest<NotImplementedResponse>("/monitoring/security-events", { method: "GET" });
+export function getExamSecurityEvents(): Promise<NotImplementedResponse> {
+  return apiRequest<NotImplementedResponse>("/admin/exam-security-events", { method: "GET" });
 }

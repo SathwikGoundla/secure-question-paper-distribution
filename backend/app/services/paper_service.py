@@ -267,6 +267,65 @@ def register_paper(
     return paper
 
 
+def list_papers(
+    db: Session,
+    current_user: CurrentUser,
+    page: int,
+    page_size: int,
+    status_filter: str | None = None,
+) -> tuple[list[Paper], int]:
+    """
+    Phase 6C addition — GET /papers. Not a numbered LLD API, but
+    required for the Admin Portal to show a real paper catalogue
+    (PROJECT_STATE.md Phase 6B Section 17.20 documented this exact
+    gap). Scoping mirrors the already-approved pattern from
+    get_paper_metadata()/retrieve_paper():
+
+      - Admin sees every paper (LLD API-05's "Admin (any paper)").
+      - Examination Centre sees ONLY papers it is currently, non-
+        revoked-ly authorized for (LLD API-05's "Examination Centre
+        (only if authorized for this paper)", generalised from a
+        single paper to the list case) — never a full catalogue, so
+        this endpoint cannot be used to enumerate papers a centre has
+        no legitimate claim on.
+      - Any other role is rejected. In practice this branch is
+        unreachable via the API today because the router's own
+        require_role("Admin", "Examination Centre") dependency already
+        rejects every other role before this function is called; kept
+        here as defense-in-depth in case this function is ever called
+        from a second caller that forgets to apply that same RBAC.
+
+    Ordering is stable (created_at DESC, paper_id DESC as a tie-
+    breaker for rows with an identical timestamp), so repeated calls
+    with the same filters return pages in a consistent order.
+    """
+    query = db.query(Paper)
+
+    if current_user.role_name == "Examination Centre":
+        if current_user.centre_id is None:
+            return [], 0
+        query = query.join(
+            PaperAuthorization, PaperAuthorization.paper_id == Paper.paper_id
+        ).filter(
+            PaperAuthorization.centre_id == current_user.centre_id,
+            PaperAuthorization.is_revoked == False,  # noqa: E712
+        )
+    elif current_user.role_name != "Admin":
+        raise ForbiddenException("You do not have permission to list question papers.")
+
+    if status_filter is not None:
+        query = query.filter(Paper.status == status_filter)
+
+    total = query.count()
+    items = (
+        query.order_by(Paper.created_at.desc(), Paper.paper_id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return items, total
+
+
 def get_paper_by_id_or_404(db: Session, paper_id: uuid.UUID) -> Paper:
     paper = db.get(Paper, paper_id)
     if paper is None:

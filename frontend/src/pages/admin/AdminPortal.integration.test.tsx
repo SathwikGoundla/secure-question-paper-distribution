@@ -20,14 +20,24 @@ describe("Admin Portal — access control and shell", () => {
       "fetch",
       routedFetchMock({
         "/auth/me": () => ADMIN_ME,
-        "/admin/dashboard/summary": () => jsonResponse(501, { detail: "Not implemented yet." }),
+        "/admin/dashboard/summary": () =>
+          jsonResponse(200, {
+            total_papers: 3,
+            papers_by_status: { registered: 3 },
+            total_exam_centres: 1,
+            active_exam_centres: 1,
+            total_paper_authorizations: 0,
+            total_audit_events: 5,
+            total_security_events: 0,
+            security_events_by_severity: {},
+          }),
       }),
     );
     renderWithProviders(<AppRoutes />, { route: "/admin" });
 
     expect(await screen.findByRole("heading", { name: /dashboard/i })).toBeInTheDocument();
     expect(screen.getByText(/admin1/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /^question papers$/i })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: /^question papers$/i })).toBeInTheDocument();
   });
 
   it("does not show the Question Papers / Exam Centres nav links to an Auditor", async () => {
@@ -67,7 +77,13 @@ describe("Admin Portal — Question Papers", () => {
 
   it("shows the empty state when no papers have been seen this session", async () => {
     seedAuthenticatedSession();
-    vi.stubGlobal("fetch", routedFetchMock({ "/auth/me": () => ADMIN_ME }));
+    vi.stubGlobal(
+      "fetch",
+      routedFetchMock({
+        "/auth/me": () => ADMIN_ME,
+        "/papers?": () => jsonResponse(200, { items: [], total: 0, page: 1, page_size: 100 }),
+      }),
+    );
     renderWithProviders(<AppRoutes />, { route: "/admin/papers" });
 
     expect(await screen.findByText(/no question papers found/i)).toBeInTheDocument();
@@ -87,6 +103,7 @@ describe("Admin Portal — Question Papers", () => {
       "fetch",
       routedFetchMock({
         "/auth/me": () => ADMIN_ME,
+        "/papers?": () => jsonResponse(200, { items: [], total: 0, page: 1, page_size: 100 }),
         "/papers/11111111-1111-1111-1111-111111111111/status": () =>
           jsonResponse(200, { paper_id: metadata.paper_id, status: metadata.status, release_timestamp: metadata.release_timestamp }),
         "/papers/11111111-1111-1111-1111-111111111111": () => jsonResponse(200, metadata),
@@ -108,6 +125,7 @@ describe("Admin Portal — Question Papers", () => {
       "fetch",
       routedFetchMock({
         "/auth/me": () => ADMIN_ME,
+        "/papers?": () => jsonResponse(200, { items: [], total: 0, page: 1, page_size: 100 }),
         "/papers/does-not-exist": () =>
           jsonResponse(404, { error: { message: "The requested resource could not be found.", status_code: 404 } }),
       }),
@@ -176,29 +194,58 @@ describe("Admin Portal — Exam Centres / Audit Logs / Security Events", () => {
     vi.restoreAllMocks();
   });
 
-  it("documents the Exam Centres backend limitation without a fake form", async () => {
+  it("Admin can view and register examination centres", async () => {
     seedAuthenticatedSession();
-    vi.stubGlobal("fetch", routedFetchMock({ "/auth/me": () => ADMIN_ME }));
+    vi.stubGlobal(
+      "fetch",
+      routedFetchMock({
+        "/auth/me": () => ADMIN_ME,
+        "/admin/centres?": () =>
+          jsonResponse(200, {
+            items: [
+              { centre_id: "c1", centre_name: "Greenview Centre", is_active: true, created_at: "2026-01-01T00:00:00Z" },
+            ],
+            total: 1,
+            page: 1,
+            page_size: 100,
+          }),
+      }),
+    );
     renderWithProviders(<AppRoutes />, { route: "/admin/exam-centres" });
 
-    expect(await screen.findByText(/not yet available/i)).toBeInTheDocument();
+    expect(await screen.findByText(/greenview centre/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/register a new examination centre/i)).toBeInTheDocument();
   });
 
-  it("surfaces the backend's real 501 message on the Audit Logs page", async () => {
+  it("surfaces real audit log entries on the Audit Logs page", async () => {
     seedAuthenticatedSession();
     vi.stubGlobal(
       "fetch",
       routedFetchMock({
         "/auth/me": () => ADMIN_ME,
         "/audit/logs": () =>
-          jsonResponse(501, { detail: "Not implemented yet — planned for the audit/monitoring implementation phase." }),
+          jsonResponse(200, {
+            items: [
+              {
+                event_id: "e1",
+                event_type: "PAPER_REGISTRATION_COMPLETED",
+                actor_id: "u1",
+                actor_username: "admin1",
+                paper_id: "p1",
+                outcome: "SUCCESS",
+                ledger_tx_reference: null,
+                created_at: "2026-01-01T00:00:00Z",
+              },
+            ],
+            total: 1,
+            page: 1,
+            page_size: 50,
+          }),
       }),
     );
     renderWithProviders(<AppRoutes />, { route: "/admin/audit-logs" });
 
-    expect(
-      await screen.findByText(/planned for the audit\/monitoring implementation phase/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/paper_registration_completed/i)).toBeInTheDocument();
   });
 
   it("shows a generic error banner on the Security Events page for a non-501 failure", async () => {
@@ -222,7 +269,7 @@ describe("Admin Portal — Exam Centres / Audit Logs / Security Events", () => {
       "fetch",
       routedFetchMock({
         "/auth/me": () => AUDITOR_ME,
-        "/audit/logs": () => jsonResponse(501, { detail: "Not implemented yet." }),
+        "/audit/logs": () => jsonResponse(200, { items: [], total: 0, page: 1, page_size: 50 }),
       }),
     );
     renderWithProviders(<AppRoutes />, { route: "/admin/audit-logs" });

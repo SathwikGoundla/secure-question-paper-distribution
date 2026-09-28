@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,8 @@ from app.database import get_db
 from app.schemas.papers import (
     PaperAuthorizeRequest,
     PaperAuthorizeResponse,
+    PaperListItemResponse,
+    PaperListResponse,
     PaperMetadataResponse,
     PaperRegisterResponse,
     PaperStatusResponse,
@@ -36,6 +38,35 @@ from app.schemas.papers import (
 from app.services import paper_service
 
 router = APIRouter(prefix="/papers", tags=["papers"])
+
+
+@router.get("", response_model=PaperListResponse)
+def list_papers(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    status_filter: str | None = Query(default=None, alias="status"),
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(require_role("Admin", "Examination Centre")),
+) -> PaperListResponse:
+    """
+    Phase 6C addition — GET /papers. Not a separately numbered LLD API
+    (LLD API-05/API-08 are single-paper lookups by ID), but required
+    for the Admin Portal's Question Papers page to show a real
+    catalogue instead of a session-local cache of manually looked-up
+    IDs (see PROJECT_STATE.md Phase 6B Section 17.20, item 2). Scoping:
+    Admin sees every paper; Examination Centre sees only papers it is
+    currently authorized for (see paper_service.list_papers's
+    docstring for the full reasoning).
+    """
+    items, total = paper_service.list_papers(
+        db, current_user, page=page, page_size=page_size, status_filter=status_filter
+    )
+    return PaperListResponse(
+        items=[PaperListItemResponse.model_validate(p) for p in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.post(

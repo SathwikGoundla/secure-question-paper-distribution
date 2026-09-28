@@ -3,7 +3,7 @@
 **Project:** Blockchain-Enabled Secure Question Paper Distribution Framework with Time-Locked Access and Tamper Detection
 **This file is the permanent continuity record for this project.** At the start of every future task: read this file, then verify it against the actual source code (not the other way around) — if this file and the code disagree, the code is correct and this file must be updated to match.
 
-Last updated: **Phase 5C (connect FastAPI backend to the Fabric Gateway Adapter) — implemented and tested this session.**
+Last updated: **Phase 6C (Admin backend completion) — implemented and tested this session.** *(Phase 6C discrepancy fix: this line previously still read "Phase 5C" and the Section 3 table below listed Phase 6B as NOT STARTED, although Phases 5D–6B were complete per their own sections and the Git history. Corrected; no source code was affected.)*
 
 ---
 
@@ -52,7 +52,9 @@ React.js (frontend, **not yet present in this repo**), Python FastAPI, PostgreSQ
 | **Phase 5D — Wire paper registration to the blockchain abstraction** | **COMPLETE** (see Section 14) |
 | Phase 5E — Blockchain-backed integrity verification at retrieval | COMPLETE (see Section 15) |
 | **Phase 6A — React frontend foundation (auth + routing shell only)** | **COMPLETE this session** (see Section 16) |
-| Phase 6B — Admin Portal | NOT STARTED |
+| Phase 6B — Admin Portal | COMPLETE (see Section 17) |
+| **Phase 6C — Admin backend completion** | **COMPLETE this session** (see Section 18) |
+| Phase 6D | NOT STARTED |
 | Phase 7 — Evaluation / feedback modules | NOT STARTED |
 
 ## 4. Known documentation-vs-code gap (pre-existing, not introduced this session)
@@ -1943,3 +1945,81 @@ Recommended next steps, in order:
 
 **Phase 6B: COMPLETE.**
 **Phase 6C: NOT STARTED.**
+
+---
+
+# 18. Phase 6C — Admin Backend Completion
+
+## 18.1 Objective
+Implement the real backend business logic that Phase 6B found missing, so the Admin Portal consumes real data instead of `501 Not Implemented`. Backend-focused; no Fabric/chaincode/blockchain-service changes; no database changes.
+
+## 18.2 Inspection performed first (actual code authoritative)
+Extracted the Phase 6B ZIP; confirmed Git history (`cc9c658 … 9a77dca … 0818431 … c35d6e9`, clean tree); read `PROJECT_STATE.md`; inspected models, schemas, services, routers, `deps.py` (`require_role`), exceptions, `audit_service`, `conftest.py`, scripts, existing tests, and the frontend API layer. Baseline: **107 backend tests passed**, **26/26 frontend tests**.
+
+Findings that shaped the design:
+- `audit_events` and `security_events` have **no `centre_id` column** (LLD 7.6/7.7). A `centre_id` filter is therefore implemented via the **acting user's** `users.centre_id` (join on `actor_id`); it does not infer centres from `paper_authorizations`.
+- `exam_centres.centre_name` has **no unique constraint**; duplicate handling is a case-insensitive **service-level** check (no migration needed).
+- A centre record is separate from centre **login accounts** (`users`, provisioned by `scripts/create_user.py`); `POST /admin/centres` creates only the centre record.
+- **Test-infrastructure fact:** `tests/conftest.py`'s `db_engine` fixture is **session-scoped**, so all tests share one accumulating database. New tests therefore use before/after deltas or per-test unique filters, never absolute global counts. Consequence: a truly "empty database" dashboard cannot be observed by a single test; it is verified via internal-consistency invariants (breakdowns sum to totals) and delta assertions. Existing fixture design was **not** changed.
+- **Documentation discrepancy (fixed):** the `PROJECT_STATE.md` header said "Phase 5C" and the Section 3 table said Phase 6B NOT STARTED; both were stale versus code/Git. Corrected.
+
+## 18.3 Initial limitations (from 6B)
+`GET /admin/dashboard/summary`, `GET /audit/logs`, `GET /monitoring/security-events`, `POST`/`PATCH /admin/centres` → 501; no centre-list endpoint; no paper-list endpoint.
+
+## 18.4 APIs implemented
+| Route | Roles | Notes |
+|---|---|---|
+| `GET /api/v1/papers` | Admin (all papers); Examination Centre (only non-revoked authorized papers) | Auditor → 403. Query: `page`(≥1), `page_size`(1–100, default 20), `status`. Order: `created_at DESC, paper_id DESC`. Route does not collide with `GET /papers/{paper_id}`. |
+| `GET /api/v1/admin/centres` | Admin | Paginated (`page`, `page_size` 1–100). |
+| `GET /api/v1/admin/centres/{centre_id}` | Admin | 404 if unknown. |
+| `POST /api/v1/admin/centres` | Admin | Body `{centre_name}`; 201; 409 on case-insensitive duplicate; blank → 422. Audit event `EXAM_CENTRE_CREATED`. |
+| `PATCH /api/v1/admin/centres/{centre_id}` | Admin | Body `{centre_name?, is_active?}`; ≥1 field required (400); 404; 409 on name clash with a *different* centre. Audit event `EXAM_CENTRE_UPDATED`. **No DELETE** (deactivate via `is_active=false`; avoids FK orphaning). |
+| `GET /api/v1/admin/dashboard/summary` | Admin | Real aggregates: `total_papers`, `papers_by_status`, `total_exam_centres`, `active_exam_centres`, `total_paper_authorizations`, `total_audit_events`, `total_security_events`, `security_events_by_severity`. No time windows, nothing hard-coded/random. |
+| `GET /api/v1/audit/logs` | Admin, Auditor | Filters: `paper_id`, `actor_id`, `event_type`, `outcome`, `centre_id`, `start_date`, `end_date`; `page`, `page_size` (1–200, default 50). Fields: `event_id, event_type, actor_id, actor_username, paper_id, outcome, ledger_tx_reference, created_at`. |
+| `GET /api/v1/monitoring/security-events` | Admin, Auditor | Filters: `severity`, `event_type`, `paper_id`, `actor_id`, `centre_id`, `start_date`, `end_date`; same pagination. Fields: `security_event_id, event_type, actor_id, actor_username, paper_id, severity, created_at`. |
+
+RBAC is unchanged from Phase 2 (`require_role` at router level; `list_papers` additionally re-checks role in the service as defense-in-depth). Exam Centre role is denied audit/security/dashboard/centre-management. `GET /admin/exam-security-events` (LLD API-15) remains an untouched 501 stub.
+
+## 18.5 Database
+**No schema changes. No migrations.**
+
+## 18.6 Files created
+Backend: `app/schemas/admin.py`, `app/schemas/audit.py`, `app/schemas/monitoring.py`, `app/services/centre_service.py`, `app/services/dashboard_service.py`; tests `tests/test_paper_list_api.py`, `tests/test_admin_centres_api.py`, `tests/test_admin_dashboard_api.py`, `tests/test_audit_logs_api.py`, `tests/test_security_events_api.py`.
+Frontend: `src/types/admin.ts`, `src/types/audit.ts`, `src/types/monitoring.ts`.
+
+## 18.7 Files modified
+Backend: `app/api/v1/admin.py`, `app/api/v1/audit.py`, `app/api/v1/papers.py`, `app/schemas/papers.py`, `app/services/audit_service.py` (added `list_audit_events`, `list_security_events`; no second audit system), `app/services/paper_service.py` (added `list_papers`), `tests/conftest.py` (added `auditor_principal` fixture).
+Frontend (minimum change so pages show real data instead of 501 notices; layout/routes/components unchanged): `src/api/endpoints.ts`, `src/types/papers.ts`, `src/pages/admin/AdminDashboardPage.tsx`, `src/pages/admin/audit/AuditLogsPage.tsx`, `src/pages/admin/security/SecurityEventsPage.tsx`, `src/pages/admin/centres/ExamCentresPage.tsx`, `src/pages/admin/papers/PapersPage.tsx`, `src/pages/admin/AdminPortal.integration.test.tsx` (mocks updated from 501 to real 200 shapes; test count unchanged). `NotYetAvailableNotice.tsx` is now unused (left in place). `PROJECT_STATE.md`.
+Not touched: `blockchain/`, chaincode, Fabric gateway, `BlockchainService`, `FabricBlockchainService`, Phase 5E integrity logic.
+
+## 18.8 Tests
+- Backend: **171 passed** (107 baseline + 64 new; full suite run 3 times, stable; `tests/test_phase2_manual.py` is excluded exactly as in the 107 baseline — it is a manual live-server script, not part of the automated suite).
+- Frontend: **26/26 passed**, `tsc -b` clean, production build succeeds.
+- Frontend 6B tests changed: the ones that asserted the *old 501 behaviour* (dashboard, papers list mock, exam centres, audit logs, auditor audit page) were updated to the new real contract; none removed, none weakened (shell/RBAC/upload/not-found tests unchanged).
+
+## 18.9 Security verification
+Reviewed new endpoints for broken access control, IDOR (centre paper listing scoped to own non-revoked authorizations), privilege escalation, sensitive-field exposure (tests assert no `wrapped_dek`, `file_nonce`, `file_reference`, `password`, OTP, bearer strings), unsafe SQL (ORM bound parameters only; tests send SQL-injection-style filter values), unbounded result sets (bounded `page_size`, DB-side `OFFSET/LIMIT`), input validation, and error messages (existing handlers; no stack traces).
+
+## 18.10 Manual API verification (performed)
+Real PostgreSQL 16 (local, port 5433) + real uvicorn + real login/OTP flow (dev OTP provider). Verified: centre list/create/duplicate(409)/get/patch(deactivate), Auditor denied centre list (403) and paper list (403), paper register → paper list, dashboard (real counts, e.g. active centres 0 after deactivation), audit logs with `event_type` filter as Auditor, security events after a real failed login, unauthenticated → 401.
+
+## 18.11 Decisions
+- Routes: `/papers` (list), `/admin/centres` list/get added beside existing POST/PATCH.
+- Auditor is **not** granted centre management, dashboard, or paper list (LLD Section 15: Admin-only management).
+- `actor_username` is exposed in audit/security responses (safe, materially useful).
+- `centre_id` audit filter = actor's centre (see 18.2).
+
+## 18.12 Known limitations
+- `start_date`/`end_date` naive datetimes are compared as sent; clients should send timezone-aware ISO-8601 values.
+- Per-centre filter cannot match events whose actor is an Admin acting on a centre's behalf (no `centre_id` on event tables).
+- Centre-login-account provisioning is still CLI-only (`scripts/create_user.py`); no API.
+- Exam-security-events (API-15) and Phase 7 modules remain unimplemented.
+- SQLite 1-second timestamp resolution affects tie ordering only in the test DB; PostgreSQL has microsecond resolution.
+- Frontend: centre rename/deactivate UI not added (backend PATCH ready); audit/security pages show the first 50 rows without pagination controls.
+
+## 18.13 Git
+Commit: `Phase 6C checkpoint: Admin backend completion` (local only; not pushed).
+
+## 18.14 Next phase
+**Phase 6C: COMPLETE.**
+**Phase 6D: NOT STARTED.**
