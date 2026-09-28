@@ -3,7 +3,7 @@
 **Project:** Blockchain-Enabled Secure Question Paper Distribution Framework with Time-Locked Access and Tamper Detection
 **This file is the permanent continuity record for this project.** At the start of every future task: read this file, then verify it against the actual source code (not the other way around) — if this file and the code disagree, the code is correct and this file must be updated to match.
 
-Last updated: **Phase 6C (Admin backend completion) — implemented and tested this session.** *(Phase 6C discrepancy fix: this line previously still read "Phase 5C" and the Section 3 table below listed Phase 6B as NOT STARTED, although Phases 5D–6B were complete per their own sections and the Git history. Corrected; no source code was affected.)*
+Last updated: **Phase 6D (Examination Centre portal completion) — implemented and tested this session.** *(Phase 6C discrepancy fix: this line previously still read "Phase 5C" and the Section 3 table below listed Phase 6B as NOT STARTED, although Phases 5D–6B were complete per their own sections and the Git history. Corrected; no source code was affected.)*
 
 ---
 
@@ -54,7 +54,8 @@ React.js (frontend, **not yet present in this repo**), Python FastAPI, PostgreSQ
 | **Phase 6A — React frontend foundation (auth + routing shell only)** | **COMPLETE this session** (see Section 16) |
 | Phase 6B — Admin Portal | COMPLETE (see Section 17) |
 | **Phase 6C — Admin backend completion** | **COMPLETE this session** (see Section 18) |
-| Phase 6D | NOT STARTED |
+| **Phase 6D — Examination Centre portal completion** | **COMPLETE this session** (see Section 19) |
+| Phase 6E | NOT STARTED |
 | Phase 7 — Evaluation / feedback modules | NOT STARTED |
 
 ## 4. Known documentation-vs-code gap (pre-existing, not introduced this session)
@@ -2022,4 +2023,79 @@ Commit: `Phase 6C checkpoint: Admin backend completion` (local only; not pushed)
 
 ## 18.14 Next phase
 **Phase 6C: COMPLETE.**
-**Phase 6D: NOT STARTED.**
+**Phase 6D: NOT STARTED** *(as of Phase 6C; superseded — Phase 6D is COMPLETE, see Section 19).*
+
+---
+
+# 19. Phase 6D — Examination Centre Portal Completion
+
+## 19.1 Objective
+Replace the Phase 6A Examination Centre placeholder with a working portal that uses **only existing backend APIs**: authorized paper list, paper detail, time-lock feedback, secure retrieval, honest security/authorization/session errors, logout.
+
+**Phase 6D required no backend source changes.** No database, blockchain, chaincode, gateway, crypto or Phase 5E logic was touched.
+
+## 19.2 Inspection performed first (actual code authoritative)
+Started from the Phase 6C ZIP (SHA-256 `b4e0dd2b…d87d8`, commit `1394b58`). Note: no 6C ZIP was uploaded with this request; the checkpoint I produced in the previous turn was used after verifying its checksum. Read backend routes/services/schemas (`papers.py`, `paper_service.py`, `exceptions/`), frontend `client.ts`, `endpoints.ts`, `AuthContext`, `ProtectedRoute`, `AppRoutes`, Admin pages and tests.
+
+Contract findings that shaped the design:
+- `GET /papers` (Phase 6C) already returns, for the Examination Centre role, **only that centre's non-revoked authorized papers**. `GET /papers/{id}` and `/status` return 403 for an unauthorized paper.
+- `GET /papers/{id}/retrieve` returns the **decrypted PDF as `application/pdf`**. It performs authorization → time-lock → AES-256-GCM → SHA-256 → blockchain verification → audit events itself.
+- HTTP 403 is used for **both** "not authorized" and "not yet released"; only the message text differs. The UI distinguishes them by the substring "not yet available" — presentation only (a wrong guess changes wording, never access).
+- 409 = integrity/ledger mismatch; 503 = dependency unavailable (its message can mention internal config such as `FABRIC_VERIFICATION_MODE`, so **5xx text is never rendered**; a fixed message is shown).
+- `Paper.status` **never changes from `"registered"`** on release. A backend "locked/released" state therefore does not exist.
+- Documentation discrepancy: none new found for this phase.
+
+## 19.3 What was built
+Routes (frontend): `/exam-centre` (dashboard + authorized paper list), `/exam-centre/papers/:paperId` (detail + retrieval). Both under a route guard for role "Examination Centre". Admin and Auditor are sent to `/unauthorized` if they visit them; an Examination Centre visiting `/admin` is sent to `/unauthorized` and makes **no** admin API calls (tested).
+- **Dashboard:** identity (username, centre ID from `/auth/me`); "Authorized papers" = backend `total`; table of Subject / Paper ID / Scheduled release / Status / Authorization / Action; loading, empty and error states.
+- **Locked vs released split (honest note):** because the backend has no released state, the "Release time reached" and "Scheduled / locked" cards compare the backend's `release_timestamp` with the **device clock**, are labelled informational, and are shown **only when every authorized paper was fetched** (`items.length === total`). They never gate an action.
+- **Detail page:** metadata, status, authorization, scheduled release, registered SHA-256, integrity note ("verified by the server at retrieval time"). Visual-only countdown (device clock). The **Retrieve button is always offered for an authorized paper**; the backend decides. After a failed attempt the button is disabled for 10 s ("Try again in Ns") to avoid aggressive retries (every refused attempt creates backend audit/security events).
+- **Released file:** the backend PDF is received as a `Blob`, turned into an object URL, and offered as "Open question paper" (new tab, `rel=noopener noreferrer`), "Download PDF" (sanitised filename) and "Discard from browser". The URL is **revoked** on discard, on replacement, after a 5-minute auto-expiry, and on unmount. Nothing is written to localStorage/sessionStorage/IndexedDB (tested: only the session token exists in sessionStorage).
+- **Error mapping** (`pages/exam-centre/errors.ts`): 403 locked → "Question paper is locked until the scheduled release time."; 403 → "You are not authorized to access this question paper."; 409 → "Security verification failed. The question paper was not released."; 404, 429, 400, 500/502/503 → fixed safe messages; network/timeout → the client's existing safe messages.
+- **Session expiry:** `apiClient` gained `setUnauthorizedHandler`; when an **authenticated** request receives 401, `AuthContext` clears the token (same steps as logout), sets "Your session has expired. Please log in again." and the route guard redirects to `/login`. Login/OTP 401s (bad credentials) do not trigger it; the silent session-restore path is unchanged. Token storage is still `sessionStorage` (Phase 6A design preserved).
+- **Logout:** existing header button (Phase 6A) — verified from the portal.
+- Frontend never decrypts, holds keys, checks hashes, or decides release.
+
+## 19.4 API changes
+None on the backend. Frontend client additions: `apiRequestBlob()` (accepts only `application/pdf` success bodies, shared timeout/auth/error handling), `retrievePaper()` in `endpoints.ts`, and `setUnauthorizedHandler()`.
+
+## 19.5 Files created
+`frontend/src/components/exam-centre/ExamCentreLayout.tsx`, `frontend/src/hooks/useNow.ts`, `frontend/src/hooks/useReleasedPaperFile.ts`, `frontend/src/pages/exam-centre/ExamCentreDashboardPage.tsx`, `ExamCentrePaperDetailPage.tsx`, `errors.ts`, `ExamCentrePortal.integration.test.tsx`.
+
+## 19.6 Files modified / removed
+Modified: `frontend/src/api/client.ts`, `frontend/src/api/endpoints.ts`, `frontend/src/api/client.test.ts` (4 tests appended), `frontend/src/contexts/AuthContext.tsx`, `frontend/src/routes/AppRoutes.tsx`, `frontend/src/test/testUtils.tsx` (added `pdfResponse`), `frontend/src/index.css` (Phase 6D block), `PROJECT_STATE.md`.
+Removed: `frontend/src/pages/placeholder/ExamCentrePlaceholderPage.tsx` (replaced; no test referenced it). `PlaceholderPage.tsx` and `AdminPlaceholderPage.tsx` remain (unused).
+Not touched: everything under `backend/` and `blockchain/`.
+
+## 19.7 Tests
+- Backend: **171/171** (unchanged suite, run from this working copy).
+- Frontend: **53/53** (26 baseline + 23 new portal integration tests + 4 new client tests). All 26 previous tests pass **unmodified**. Suite also run 3× with `--sequence.shuffle`: 53/53 each time.
+- Mutation check (temporary, reverted): removing the integrity message, removing URL revocation, and disabling the 401 handler each made the relevant new tests fail.
+- TypeScript `tsc -b`: clean. Production build: succeeds.
+
+## 19.8 Manual verification (performed, with limits)
+Real PostgreSQL 16 + real uvicorn + real login/OTP, exercising the exact contract the portal consumes: centre lists only its 3 authorized papers (unauthorized paper absent); unauthorized `GET /papers/{id}` and retrieve → 403; pre-release retrieve → 403 "not yet available"; released retrieve → 200 `application/pdf` beginning `%PDF-1.4`; ciphertext byte-flipped on disk → 409 integrity message; invalid token → 401; centre → `/admin/dashboard/summary`, `/audit/logs`, `/monitoring/security-events`, `/admin/centres` (GET/POST) → 403; backend recorded `PAPER_RELEASED`, `PRE_RELEASE_ATTEMPT`, `TAMPER_DETECTED`, `PAPER_ACCESS_ATTEMPT`. **Not performed:** clicking through the UI in a real browser (none available); UI behaviour is verified by component/integration tests against mocked responses shaped like the verified contract.
+
+## 19.9 Security review
+Diff/file-list inspected before commit: no secrets, no hard-coded credentials, no `dangerouslySetInnerHTML`/`innerHTML`, no console logging, no new persistent storage, object URLs only from `URL.createObjectURL`, download filename sanitised, backend 5xx text never rendered, RBAC still enforced by the backend (route guard is supplementary and tested alongside real 403s).
+
+## 19.10 Decisions
+- Retrieve button stays available (backend authoritative; device clock never blocks access) with a 10 s post-failure cooldown.
+- Locked/released cards use the device clock, labelled informational, and are omitted when the list is not fully fetched.
+- Fixed wording for all 4xx/5xx errors except network/timeout.
+
+## 19.11 Known limitations / unresolved
+- Backend cannot report a real "released" state or a pre-retrieval integrity result; the UI says so rather than inventing one.
+- 403 not-authorized vs not-yet-released is distinguished by message text (fragile if backend wording changes); a distinct status/code would be a future backend improvement.
+- Device-clock countdown can be wrong if the device clock is wrong; it is informational only.
+- List shows at most 100 papers (backend page-size limit); no pagination controls; summary split omitted beyond that.
+- The centre's display name is not available to the centre role (centre endpoints are Admin-only); only centre ID is shown.
+- Retrieval timeout is the client default (15 s); a very slow ledger check would surface as a timeout message.
+- No real-browser (Playwright/Cypress) test; `PlaceholderPage`/`AdminPlaceholderPage` are now unused.
+
+## 19.12 Git
+Commit: `Phase 6D checkpoint: Examination Centre portal` (local only; not pushed).
+
+## 19.13 Next phase
+**Phase 6D — COMPLETE**
+**Phase 6E — NOT STARTED**

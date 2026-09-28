@@ -48,3 +48,18 @@ export function routedFetchMock(
     return routes[matchKey]();
   });
 }
+
+/**
+ * Phase 6D test helper: a Response-like object for a successful binary
+ * PDF download (what GET /papers/{id}/retrieve returns), including the
+ * `content-type` header the API client checks before accepting a body.
+ */
+export function pdfResponse(contentType = "application/pdf"): Response {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? contentType : null) },
+    blob: async () => new Blob(["%PDF-1.4 test"], { type: "application/pdf" }),
+    json: async () => ({}),
+  } as unknown as Response;
+}

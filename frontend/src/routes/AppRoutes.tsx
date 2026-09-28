@@ -3,7 +3,6 @@ import { useAuth } from "../hooks/useAuth";
 import { ProtectedRoute } from "./ProtectedRoute";
 import { LoginPage } from "../pages/auth/LoginPage";
 import { OTPPage } from "../pages/auth/OTPPage";
-import { ExamCentrePlaceholderPage } from "../pages/placeholder/ExamCentrePlaceholderPage";
 import { UnauthorizedPage } from "../pages/errors/UnauthorizedPage";
 import { NotFoundPage } from "../pages/errors/NotFoundPage";
 import { LoadingIndicator } from "../components/common/LoadingIndicator";
@@ -15,6 +14,9 @@ import { PaperDetailPage } from "../pages/admin/papers/PaperDetailPage";
 import { ExamCentresPage } from "../pages/admin/centres/ExamCentresPage";
 import { AuditLogsPage } from "../pages/admin/audit/AuditLogsPage";
 import { SecurityEventsPage } from "../pages/admin/security/SecurityEventsPage";
+import { ExamCentreLayout } from "../components/exam-centre/ExamCentreLayout";
+import { ExamCentreDashboardPage } from "../pages/exam-centre/ExamCentreDashboardPage";
+import { ExamCentrePaperDetailPage } from "../pages/exam-centre/ExamCentrePaperDetailPage";
 
 /**
  * Sends an authenticated user to the section matching their role.
@@ -99,10 +101,13 @@ export function AppRoutes() {
         path="/exam-centre"
         element={
           <ProtectedRoute allowedRoles={["Examination Centre"]}>
-            <ExamCentrePlaceholderPage />
+            <ExamCentreLayout />
           </ProtectedRoute>
         }
-      />
+      >
+        <Route index element={<ExamCentreDashboardPage />} />
+        <Route path="papers/:paperId" element={<ExamCentrePaperDetailPage />} />
+      </Route>
 
       <Route
         path="/"

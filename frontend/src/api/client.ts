@@ -51,6 +51,27 @@ export function setAuthToken(token: string | null): void {
   authToken = token;
 }
 
+type UnauthorizedHandler = () => void;
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+/**
+ * Phase 6D addition. Registers a callback invoked when an
+ * AUTHENTICATED request (one that carried the session bearer token) is
+ * rejected with HTTP 401 — i.e. the session expired or was revoked.
+ * AuthContext is the only registrant: it clears the session and sends
+ * the user to the login page. Login / OTP calls (authenticated:false)
+ * never trigger it, since a 401 there just means bad credentials.
+ */
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
+  unauthorizedHandler = handler;
+}
+
+function notifyIfSessionRejected(status: number, hadToken: boolean): void {
+  if (status === 401 && hadToken && unauthorizedHandler) {
+    unauthorizedHandler();
+  }
+}
+
 interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   body?: unknown;
@@ -102,6 +123,7 @@ export async function apiRequestMultipart<TResponse>(
   }
 
   if (!response.ok) {
+    notifyIfSessionRejected(response.status, authToken !== null);
     const message = await extractErrorMessage(response);
     throw new ApiError(message, response.status);
   }
@@ -110,6 +132,54 @@ export async function apiRequestMultipart<TResponse>(
     return undefined as TResponse;
   }
   return (await response.json()) as TResponse;
+}
+
+/**
+ * Phase 6D addition: authenticated GET that returns a binary body as a
+ * Blob — used only for the secure paper-retrieval endpoint
+ * (GET /papers/{paper_id}/retrieve), which returns the backend-approved,
+ * already-decrypted PDF as `application/pdf`. All request/timeout/auth/
+ * error handling is shared with apiRequest's behaviour. The body is
+ * accepted ONLY if the backend labelled it application/pdf; anything
+ * else is treated as an error, never handed to the browser as a file.
+ */
+export async function apiRequestBlob(path: string): Promise<Blob> {
+  const headers: Record<string, string> = { Accept: "application/pdf, application/json" };
+  const hadToken = authToken !== null;
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError(TIMEOUT_ERROR_MESSAGE, null);
+    }
+    throw new ApiError(NETWORK_ERROR_MESSAGE, null);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    notifyIfSessionRejected(response.status, hadToken);
+    const message = await extractErrorMessage(response);
+    throw new ApiError(message, response.status);
+  }
+
+  const contentType = response.headers?.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/pdf")) {
+    throw new ApiError(GENERIC_FALLBACK_MESSAGE, response.status);
+  }
+  return await response.blob();
 }
 
 /**
@@ -185,6 +255,7 @@ export async function apiRequest<TResponse>(
   }
 
   if (!response.ok) {
+    notifyIfSessionRejected(response.status, authenticated && authToken !== null);
     const message = await extractErrorMessage(response);
     throw new ApiError(message, response.status);
   }

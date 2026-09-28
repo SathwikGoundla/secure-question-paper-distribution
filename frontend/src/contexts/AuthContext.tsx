@@ -3,11 +3,12 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import { getCurrentUser, login as loginRequest, logout as logoutRequest, verifyOtp as verifyOtpRequest } from "../api/endpoints";
-import { setAuthToken } from "../api/client";
+import { setAuthToken, setUnauthorizedHandler } from "../api/client";
 import { ApiError } from "../types/api";
 import type { AuthStatus, AuthUser } from "../types/auth";
 
@@ -70,6 +71,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // default: 5 minutes) and is only needed to complete the OTP step
   // that immediately follows a successful login in the same session.
   const [preAuthToken, setPreAuthToken] = useState<string | null>(null);
+
+  // Phase 6D: session-expiry handling. The API client calls this when an
+  // AUTHENTICATED request gets HTTP 401. It reuses the exact same
+  // clearing steps as logout (no new auth mechanism) and leaves a clear
+  // message for the login page. Ignored unless a session is actually
+  // active, so bad-credential 401s and the silent session-restore path
+  // are unaffected.
+  const statusRef = useRef<AuthStatus>(status);
+  statusRef.current = status;
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      if (statusRef.current !== "authenticated") return;
+      sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+      setAuthToken(null);
+      setUser(null);
+      setPreAuthToken(null);
+      setError("Your session has expired. Please log in again.");
+      setStatus("unauthenticated");
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   // Restore a session (if any) on initial load.
   useEffect(() => {

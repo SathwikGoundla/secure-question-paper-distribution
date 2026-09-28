@@ -10,7 +10,7 @@
  *
  * No endpoint here is invented.
  */
-import { apiRequest, apiRequestMultipart } from "./client";
+import { apiRequest, apiRequestBlob, apiRequestMultipart } from "./client";
 import type {
   CurrentUserResponse,
   LoginRequest,
@@ -124,6 +124,19 @@ export function getPaperMetadata(paperId: string): Promise<PaperMetadataResponse
  */
 export function getPaperStatus(paperId: string): Promise<PaperStatusResponse> {
   return apiRequest<PaperStatusResponse>(`/papers/${paperId}/status`, { method: "GET" });
+}
+
+/**
+ * GET /api/v1/papers/{paper_id}/retrieve — Examination-Centre-only, and
+ * only for a paper the centre is authorized for (LLD API-07). The
+ * BACKEND performs authorization, time-lock, AES-256-GCM decryption,
+ * SHA-256 verification and blockchain-backed verification, then returns
+ * the approved PDF. The frontend never decrypts or verifies anything.
+ * Resolves to a PDF Blob; rejects with ApiError (403 not-yet-available /
+ * unauthorized, 409 integrity failure, 503 dependency unavailable, ...).
+ */
+export function retrievePaper(paperId: string): Promise<Blob> {
+  return apiRequestBlob(`/papers/${paperId}/retrieve`);
 }
 
 /**

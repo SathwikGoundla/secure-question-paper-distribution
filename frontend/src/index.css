@@ -440,3 +440,90 @@ body {
     padding: 1.25rem 1rem;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6D — Examination Centre Portal                                */
+/* ------------------------------------------------------------------ */
+
+.centre-shell {
+  min-height: calc(100vh - 57px);
+}
+
+.centre-nav {
+  display: flex;
+  background-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  padding: 0 1.5rem;
+}
+
+.centre-nav .admin-nav-link {
+  border-left: none;
+  border-bottom: 3px solid transparent;
+}
+
+.centre-nav .admin-nav-link.active {
+  border-bottom-color: var(--color-primary);
+}
+
+.centre-content {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.75rem 1.5rem;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.status-ok {
+  border-color: #027a48;
+  color: #027a48;
+  background-color: #ecfdf3;
+}
+
+.notice {
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  margin: 1rem 0;
+  font-size: 0.92rem;
+  border: 1px solid var(--color-border);
+  background-color: var(--color-surface);
+}
+
+.notice-locked {
+  border-color: #b54708;
+  background-color: #fffaeb;
+  color: #7a2e0e;
+}
+
+.notice-security {
+  border-color: var(--color-danger);
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.notice-success {
+  border-color: #027a48;
+  background-color: #ecfdf3;
+  color: #054f31;
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0.5rem 0 0;
+}
+
+.btn-link {
+  width: auto;
+  text-align: center;
+  text-decoration: none;
+  display: inline-block;
+}
+
+@media (max-width: 720px) {
+  .centre-content {
+    padding: 1.25rem 1rem;
+  }
+}
