@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # set once the channel (email/authenticator app) is decided (see LLD DD-12).
     OTP_DELIVERY_CHANNEL: str = Field(default="NOT_YET_DETERMINED")
     OTP_EXPIRE_SECONDS: int = Field(default=300)
+    # Phase 6E-1: bounds how many FAILED verification attempts a single
+    # OTP challenge tolerates before it is treated as exhausted/locked
+    # (app/services/auth_service.verify_otp_step2). A correct code
+    # submitted after the limit is reached is still rejected — the
+    # user must start a new /auth/login to obtain a fresh challenge.
+    OTP_MAX_ATTEMPTS: int = Field(default=5)
 
     # --- Storage (LLD Section 21; DD-13: provider NOT YET DETERMINED) ---
     # STORAGE_BACKEND selects the StorageService implementation (see services/storage_service.py).

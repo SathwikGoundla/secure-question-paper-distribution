@@ -2099,3 +2099,135 @@ Commit: `Phase 6D checkpoint: Examination Centre portal` (local only; not pushed
 ## 19.13 Next phase
 **Phase 6D — COMPLETE**
 **Phase 6E — NOT STARTED**
+
+# 20. Phase 6E-1 — OTP Attempt Limiting + Automated OTP Security Tests
+
+## 20.1 Objective
+Close the gap identified by the Phase 6E security audit: OTP verification (SRS FR-002, LLD API-02) had secure generation, hashed storage, expiry, and single-use enforcement, but **no bound on how many times a given OTP challenge could be guessed** within its expiry window. Phase 6E-1 adds a bounded failed-attempt mechanism and brings the full login→OTP→JWT chain into the automated `pytest` suite (previously exercised only by `tests/test_phase2_manual.py`, a manual/live-server script outside normal `pytest` runs).
+
+Scope was deliberately narrow, per the Phase 6E-1 task: OTP attempt limiting and its tests only. HTTP security headers, general rate limiting, account lockout, IDOR test expansion, and secret-leakage tests remain **Phase 6E-2, NOT STARTED**.
+
+## 20.2 Inspection performed first (actual code authoritative)
+Read `PROJECT_STATE.md` (Phase 6D section), `app/models/otp_code.py`, `app/services/auth_service.py`, `app/config.py`, `app/schemas/auth.py`, `app/exceptions/base.py` and `handlers.py`, `tests/conftest.py`, `tests/test_phase2_manual.py`, `scripts/init_db.py`, `scripts/add_phase3_columns.py`, `scripts/add_phase5d_columns.py`, `backend/.env.example`, `backend/requirements.txt`. Verified the uploaded ZIP's SHA-256 matched the stated Phase 6D checksum and that `git log` showed a clean tree at commit `ca8b2cd`. Ran the pre-existing suite against SQLite **and** against a freshly installed local PostgreSQL 16 before changing anything: **171/171 passed on both**, confirming the Phase 6D report's number was genuine (not merely re-stated).
+
+No discrepancy found between `PROJECT_STATE.md` and actual code for this phase's scope.
+
+## 20.3 OTP Attempt-Limit Design
+- **Storage:** one new column, `otp_codes.failed_attempts` (`INTEGER NOT NULL DEFAULT 0`), counting only **failed** verification attempts against that specific challenge — never a "total attempts" count, and the raw OTP itself is still never stored (only its hash, unchanged from Phase 1/2).
+- **Configured maximum:** new setting `OTP_MAX_ATTEMPTS` in `app/config.py` (`Settings`), default `5`, added to `backend/.env.example` next to the existing `OTP_DELIVERY_CHANNEL`/`OTP_EXPIRE_SECONDS` settings — same configuration pattern, no competing mechanism introduced.
+- **Check order** in `verify_otp_step2` (`app/services/auth_service.py`), for the latest not-yet-used OTP row belonging to the user:
+  1. Row is fetched with `.with_for_update()`.
+  2. If the row is already at or above `OTP_MAX_ATTEMPTS`, the request is rejected **without even checking the submitted code** — a correct code submitted after the limit is reached still fails.
+  3. Otherwise, expiry and hash are checked exactly as before (Phase 1/2, unchanged). On failure, `failed_attempts` is incremented by 1 and the request is rejected. The one increment that reaches the configured maximum additionally records a one-time `OTP_CHALLENGE_LOCKED` security event; further rejected attempts against an already-locked challenge do not increment the counter further and do not re-emit that event (each still records the existing `INVALID_OTP` event, unchanged from before).
+  4. On success (unchanged): `is_used` is set, the session JWT is issued, the `auth_sessions` row is created.
+- **Expiry interaction:** unchanged — an expired OTP is still rejected via the pre-existing `otp_row.expires_at > now` check; the new lock check runs first (and does not weaken this), so both conditions are still independently enforced.
+- **Single-use interaction:** unchanged — a successfully-used OTP's `is_used=True` row is excluded from the query that finds the active challenge (`OtpCode.is_used == False`), so it becomes indistinguishable from "no challenge exists" on a repeat attempt, exactly as before Phase 6E-1.
+- **Concurrency:** the `SELECT ... FOR UPDATE` row lock, held for the remainder of the request's transaction, gives real serialization of concurrent verification attempts against the same challenge **on PostgreSQL** (the project's approved database). SQLite (used by the default automated test run) does not support row-level locking; SQLAlchemy silently no-ops the clause there (verified directly — see Phase 6E-1 implementation session), so the automated suite exercises correct **sequential** semantics only. This is a documented limitation, not a hidden one: true multi-process concurrent-request atomicity is a PostgreSQL-only guarantee here, consistent with the project's single-instance B.Tech deployment scope. No Redis, distributed lock, or other new infrastructure was introduced.
+- **Client-facing behaviour:** identical HTTP 401 and identical message (`"Invalid or expired OTP."`) for wrong code, expired code, and exhausted challenge — deliberately, so a response cannot be used to distinguish which condition applies. No new status code, no new error-response shape; the existing `{"error": {"message": ..., "status_code": ...}}` shape (`app/exceptions/handlers.py`) is unchanged.
+
+### Authentication flow (unchanged shape, hardened OTP step)
+```
+Login (username+password)
+  -> pre-auth token + OTP "delivered" (unchanged)
+  -> POST /auth/otp/verify
+       -> pre-auth token purpose/user validated (unchanged)
+       -> [NEW] row-lock latest unused OTP for user
+       -> [NEW] already exhausted? -> 401, no code check
+       -> expired or wrong code?   -> [NEW] increment failed_attempts,
+                                       [NEW] lock + one-time security event
+                                       if this reaches the max -> 401
+       -> correct code, not exhausted -> mark used, issue access JWT,
+                                          create auth_sessions row (unchanged)
+```
+
+## 20.4 Files Changed
+
+### Created
+- `backend/scripts/add_phase6e1_columns.py` — additive, idempotent `ALTER TABLE otp_codes ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0`, following the exact existing convention of `scripts/add_phase5d_columns.py`/`add_phase3_columns.py` (this project intentionally does not use Alembic — a Phase 1 decision, unchanged).
+- `backend/tests/test_otp_attempt_limiting.py` — 10 new automated pytest tests (Section 20.7).
+
+### Modified
+- `backend/app/models/otp_code.py` — added `failed_attempts` column + docstring.
+- `backend/app/config.py` — added `OTP_MAX_ATTEMPTS` setting (default 5).
+- `backend/app/services/auth_service.py` — `verify_otp_step2` hardened as described in 20.3; `login_step1`, `logout`, and every other function in this file are byte-for-byte unchanged.
+- `backend/.env.example` — added `OTP_MAX_ATTEMPTS=5` documentation line.
+- `PROJECT_STATE.md` — this section.
+
+### Deleted
+None.
+
+**Not touched:** frontend, blockchain/chaincode, `FabricBlockchainService`/`BlockchainService`, question-paper crypto/retrieval code, every other backend route/service/model, `.env` (only `.env.example`).
+
+## 20.5 Database Changes
+Additive only. New column `otp_codes.failed_attempts INTEGER NOT NULL DEFAULT 0`. Verified three ways:
+1. Fresh database: `Base.metadata.create_all()` (`scripts/init_db.py`, unchanged) creates the column automatically since it is now part of the ORM model.
+2. Pre-existing database (simulated by dropping the column from an already-populated PostgreSQL test database and re-running the new script): `python -m scripts.add_phase6e1_columns` added it back with the correct type/default, and was confirmed safe to run a second time (`IF NOT EXISTS`, no error, no data change).
+3. Full automated suite (181 tests) passed against that same real PostgreSQL 16 instance after the column existed.
+
+No existing table was dropped, renamed, or had a column removed. No data migration/backfill was needed (default `0` is the honest value for every pre-existing row, matching the same reasoning already used in `add_phase5d_columns.py`).
+
+## 20.6 API / Authentication Behaviour
+- `POST /auth/login` — unchanged (still 200 with `otp_required` + `pre_auth_token`, or 401 `"Invalid username or password."`).
+- `POST /auth/otp/verify` — unchanged status codes and unchanged message text for every case:
+  - Correct code, challenge not exhausted → 200, `{"access_token": ..., "token_type": "bearer", "role": ...}` (unchanged shape).
+  - Wrong code, expired code, or code submitted against an exhausted challenge → 401, `{"error": {"message": "Invalid or expired OTP.", "status_code": 401}}` (unchanged shape and unchanged message — this is the deliberate non-distinguishing behaviour described in 20.3).
+  - Invalid/expired pre-auth token, or wrong token purpose → unchanged (401, pre-existing messages).
+- `POST /auth/logout`, `GET /auth/me` — untouched.
+- No new endpoint was added. No existing response schema (`app/schemas/auth.py`) was changed.
+
+## 20.7 Audit/Security Logging
+- `INVALID_OTP` security event — unchanged event type, still recorded on every rejected verification attempt (wrong code, expired code, **and** now also on attempts against an already-locked challenge — continued audit visibility was judged more valuable than event-count minimalism for that specific case, since it lets an operator see repeated hammering against a dead challenge).
+- `OTP_CHALLENGE_LOCKED` — **new** security event type, `severity="HIGH"`, recorded **exactly once** per challenge, at the precise attempt that pushes `failed_attempts` to `OTP_MAX_ATTEMPTS`. Never repeated for subsequent attempts against the same now-locked challenge.
+- No new audit_event type was introduced (the pre-existing pattern already logs OTP failures only as security events, not audit events — Phase 6E-1 follows that same pattern rather than inventing a parallel one).
+- Confirmed by direct source review: neither the raw OTP value, its hash, the pre-auth token, the password, nor any issued JWT is ever passed to `record_security_event`/`record_audit_event` or to any `logger.*` call in the modified code. `record_security_event` only ever receives `event_type` (a fixed string), `actor_id` (a UUID), and `severity` (a fixed string) — matching the pre-existing `security_events` table shape exactly (LLD Section 7.7), unchanged.
+
+## 20.8 Tests Added
+All 10 in `backend/tests/test_otp_attempt_limiting.py`, using the project's existing `client`/`db_session` fixtures and a new local `otp_user` fixture (mirrors the existing `admin_principal` pattern but stops before the OTP step, so each test can submit its own guesses) and a new local `_login`/`_verify` helper pair (mirrors `tests/conftest.py`'s existing `_login_and_capture_token` technique for reading the dev-only-delivered OTP value, without auto-verifying it):
+
+1. `test_successful_otp_verification_issues_access_token` — ordinary happy path still works end-to-end (login → OTP → JWT → authenticated `/auth/me` call).
+2. `test_wrong_otp_is_rejected_and_increments_failed_attempts` — one wrong guess: 401, challenge stays active, `failed_attempts` becomes 1, and the correct code afterward still succeeds.
+3. `test_multiple_wrong_attempts_are_each_rejected_and_counted` — three wrong guesses in a row: each rejected, counter reads 1, 2, 3 in turn.
+4. `test_max_attempts_locks_the_challenge` — exhausts the configured maximum, then proves the **objectively correct** code is rejected afterward (the critical acceptance-criterion scenario).
+5. `test_attempts_after_lockout_remain_rejected` — after lockout, further attempts (mixed wrong/correct) stay rejected and the stored counter does not keep climbing past the configured maximum.
+6. `test_correct_otp_before_max_still_succeeds` — one wrong guess, then the correct code, still succeeds normally (JWT issued, `is_used=True`, a real `auth_sessions` row created) — proves the limiter does not break legitimate users.
+7. `test_expired_otp_remains_rejected` — expiry forced via direct DB update (same technique `test_phase2_manual.py` already used); the objectively correct code is still rejected.
+8. `test_reused_otp_remains_rejected` — successful verification, then a second attempt with the same code is still rejected — single-use enforcement is intact.
+9. `test_new_login_after_lockout_creates_a_fresh_usable_challenge` — exhausts one challenge, starts a new login, confirms the new challenge is independently usable and the old, exhausted one remains dead even after the new one exists.
+10. `test_invalid_otp_response_does_not_leak_secrets` — asserts the exact, minimal error-response shape and that the response body/text never contains the correct OTP value, its hash, the password, or the pre-auth token — for both an ordinary wrong-code rejection and an exhausted-challenge rejection (confirming both produce byte-identical response shapes).
+
+## 20.9 Test Results
+- **Targeted OTP tests:** 10/10 passed (SQLite; also passed as part of the full PostgreSQL run below).
+- **Full backend suite (excluding the pre-existing manual live-server script `test_phase2_manual.py`, unchanged in scope from Phase 6D):**
+  - SQLite (default test configuration): **181/181 passed** (171 pre-existing + 10 new), in 209.67s.
+  - Real PostgreSQL 16 (freshly installed for this session, schema created via `scripts/init_db.py` then `scripts/add_phase6e1_columns.py` verified separately — see 20.5): **181/181 passed**, in 207.58s.
+- **Frontend tests:** not run — no frontend file was touched (Phase 6E-1 is backend-only).
+- **TypeScript / production build:** not run — no frontend file was touched.
+- **Python compile check:** `python -m py_compile` over every file in `app/` and `scripts/` — clean.
+- **Order-independence:** the new test file's 10 tests were run (a) in the order pytest collects them, (b) fully reversed, (c) interleaved with two unrelated existing test files (`test_time_lock.py`, `test_paper_api.py`) in a different collection position, and (d) three of the ten run individually in complete process isolation. All passed in every arrangement. (The project's `requirements.txt` does not include a random-order plugin such as `pytest-randomly`; per this phase's explicit dependency rule — no new dependency unless genuinely necessary — order-independence was instead demonstrated via these explicit reordered/isolated invocations rather than by adding one.)
+- **Security scan:** `git diff` of every changed file searched for `print(`, `console.log`, hard-coded passwords/tokens, PEM/private-key markers — none found. `git status` confirms no `.env` file was touched (only `.env.example`), no build artifacts, no `__pycache__`, no unrelated files.
+
+## 20.10 Mutation Check
+Two controlled regressions were introduced into `app/services/auth_service.py`, one at a time, each fully reverted (confirmed byte-identical via `diff` against a pre-mutation backup) before the next:
+1. **Removed the `failed_attempts` increment** on a rejected attempt (replaced with a no-op). Result: **7 of 10** targeted tests failed (`test_wrong_otp_is_rejected_and_increments_failed_attempts`, `test_multiple_wrong_attempts_are_each_rejected_and_counted`, `test_max_attempts_locks_the_challenge`, `test_attempts_after_lockout_remain_rejected`, `test_correct_otp_before_max_still_succeeds`, `test_new_login_after_lockout_creates_a_fresh_usable_challenge`, `test_invalid_otp_response_does_not_leak_secrets`). Reverted; suite re-confirmed green.
+2. **Effectively disabled the lock condition** (`failed_attempts >= OTP_MAX_ATTEMPTS` changed to `failed_attempts > OTP_MAX_ATTEMPTS + 10`, simulating a silently-widened threshold). Result: **4 of 10** targeted tests failed, including the critical `test_max_attempts_locks_the_challenge`. Reverted; suite re-confirmed green.
+
+Both mutations were caught. The mutated file was fully restored from a pre-mutation backup and the complete 181-test suite was re-run clean afterward (20.9).
+
+## 20.11 Security Review
+Direct source/diff review for this phase's changed files confirmed: no plaintext OTP storage (still hashed only), no plaintext password anywhere, no JWT/pre-auth-token logging, no OTP value logging, no new secrets in source or tests, no hard-coded credentials, no bypass flags, no disabled authentication checks, no broad exception swallowing, no `.env` modification (only `.env.example`), no debug `print()`/`console.log` additions, no new dependency added.
+
+## 20.12 Known Limitations
+- Row-level locking (`with_for_update()`) provides real concurrent-attempt protection only on PostgreSQL; SQLite (the default automated-test backend) silently ignores it, so true concurrent-request atomicity is untested by the default `pytest` run — only sequential correctness is. This is a single-instance-deployment-appropriate limitation, documented rather than hidden, consistent with this project's explicit non-goal of distributed infrastructure.
+- `OTP_CHALLENGE_LOCKED` is a new security-event type; the Admin dashboard's existing security-events view (Phase 6C) will display it like any other event type without code changes, but no dashboard-specific formatting/labelling for this new type was added (out of scope for a backend-only phase).
+- Order-independence was demonstrated via explicit reordered/isolated pytest invocations rather than an installed random-order plugin (see 20.9) — a deliberate choice under this phase's "no new dependency unless necessary" rule, not an oversight.
+- HTTP security headers, general/login rate limiting, account lockout, the two-distinct-centre IDOR test, and the general secret-leakage regression test remain unimplemented — explicitly deferred to Phase 6E-2 per this phase's scope.
+
+## 20.13 Git
+- Commit message: `Phase 6E-1 checkpoint: OTP attempt limiting`
+- Branch: `master`
+- Working tree after commit: clean
+- Pushed to GitHub: **NO**
+
+## 20.14 Next phase
+**Phase 6E-1 — COMPLETE**
+**Phase 6E-2 — HTTP Security Headers + Authentication Rate Limiting — NOT STARTED**

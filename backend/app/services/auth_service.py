@@ -80,6 +80,48 @@ def verify_otp_step2(db: Session, pre_auth_token: str, otp_code: str) -> OtpVeri
     LLD API-02 (POST /auth/otp/verify). Validates the OTP (second
     factor, FR-002) and, on success, issues the full session JWT
     (FR-003) and creates the auth_sessions row (LLD 7.9).
+
+    Phase 6E-1 addition — bounded failed-attempt limiting (closes the
+    gap identified in the Phase 6E security audit: previously an OTP
+    challenge could be guessed an unlimited number of times within its
+    expiry window). Check order for one challenge:
+
+      1. Locate the latest not-yet-used OTP row for this user, taking a
+         row-level lock (`with_for_update()`) for the remainder of this
+         request. On PostgreSQL (the project's approved database) this
+         serializes concurrent verification attempts against the SAME
+         challenge, so two simultaneous requests cannot both read a
+         stale `failed_attempts` value and silently undercount (the
+         second waits for the first's transaction to commit and
+         release the lock). SQLite (used by the automated test suite)
+         does not support row-level locking and silently ignores this
+         clause — tests therefore exercise the *sequential* semantics
+         only; true concurrent-request atomicity is a PostgreSQL-only
+         guarantee, not a distributed one, and is not claimed beyond
+         that. This is a documented limitation, not a hidden one.
+      2. If no such row exists at all, OR it is already exhausted
+         (`failed_attempts >= settings.OTP_MAX_ATTEMPTS`), reject
+         immediately WITHOUT checking the submitted code — a correct
+         code submitted against an exhausted challenge must still
+         fail, since the challenge itself is no longer valid.
+      3. Otherwise, check expiry and hash as before. On failure,
+         atomically increment `failed_attempts` (safe under the lock
+         taken in step 1) and reject. The one attempt that pushes the
+         count up to the configured maximum additionally records a
+         one-time `OTP_CHALLENGE_LOCKED` security event (not repeated
+         on every subsequent rejected attempt against the now-dead
+         challenge — those still get the existing `INVALID_OTP` event,
+         for continued audit visibility, but the counter itself is not
+         advanced further).
+      4. On success, unchanged: mark used, issue the session JWT,
+         create the auth_sessions row.
+
+    The client-facing error message and status code (401, "Invalid or
+    expired OTP.") are IDENTICAL for "wrong code", "expired code", and
+    "exhausted challenge" — deliberately, so a caller cannot use the
+    response to distinguish which condition applies (SEC-010-adjacent:
+    do not hand an attacker a more precise oracle than they had
+    before this phase).
     """
     try:
         claims = decode_access_token(pre_auth_token)
@@ -99,10 +141,21 @@ def verify_otp_step2(db: Session, pre_auth_token: str, otp_code: str) -> OtpVeri
         db.query(OtpCode)
         .filter(OtpCode.user_id == user_id, OtpCode.is_used == False)  # noqa: E712
         .order_by(OtpCode.created_at.desc())
+        .with_for_update()
         .first()
     )
 
     now = datetime.now(timezone.utc)
+
+    if otp_row is not None and otp_row.failed_attempts >= settings.OTP_MAX_ATTEMPTS:
+        # Challenge already exhausted by prior failed attempts (Test 4/5/
+        # acceptance: "correct OTP after max is reached MUST be rejected").
+        # Never re-checks the code, never increments further, never
+        # re-emits OTP_CHALLENGE_LOCKED (that fired once, at the moment
+        # this challenge was actually locked, in the branch below).
+        _record_security_event(db, "INVALID_OTP", actor_id=user_id)
+        raise UnauthorizedException("Invalid or expired OTP.")
+
     otp_valid = (
         otp_row is not None
         and otp_row.expires_at > now
@@ -110,6 +163,16 @@ def verify_otp_step2(db: Session, pre_auth_token: str, otp_code: str) -> OtpVeri
     )
 
     if not otp_valid:
+        if otp_row is not None:
+            # Atomic under the row lock acquired above (PostgreSQL);
+            # a plain attribute increment is safe here specifically
+            # because with_for_update() already serialized concurrent
+            # access to this row for the duration of this transaction.
+            otp_row.failed_attempts += 1
+            just_locked = otp_row.failed_attempts >= settings.OTP_MAX_ATTEMPTS
+            db.commit()
+            if just_locked:
+                _record_security_event(db, "OTP_CHALLENGE_LOCKED", actor_id=user_id, severity="HIGH")
         _record_security_event(db, "INVALID_OTP", actor_id=user_id)
         raise UnauthorizedException("Invalid or expired OTP.")
 
