@@ -74,6 +74,36 @@ class Settings(BaseSettings):
     # user must start a new /auth/login to obtain a fresh challenge.
     OTP_MAX_ATTEMPTS: int = Field(default=5)
 
+    # --- Phase 6E-2: authentication rate limiting ---
+    # Applies ONLY to POST /auth/login and POST /auth/otp/verify (never
+    # the whole API — see app/api/v1/auth.py). Independent of, and
+    # checked strictly BEFORE, the Phase 6E-1 OTP failed-attempt
+    # counter: a 429 here never touches otp_codes.failed_attempts.
+    # In-process only (app/security/rate_limiter.py) — see that
+    # module's docstring for the documented single-instance limitation.
+    AUTH_LOGIN_RATE_LIMIT: int = Field(default=5)
+    AUTH_LOGIN_RATE_WINDOW_SECONDS: int = Field(default=60)
+    # Deliberately NOT the same "5" suggested as a generic starting
+    # point: this endpoint already has an independent, lower-level
+    # control at exactly 5 (OTP_MAX_ATTEMPTS, above) that bounds WRONG
+    # GUESSES against one specific challenge. This rate limit instead
+    # bounds RAW REQUEST VOLUME against the endpoint — a coarser,
+    # complementary flood/automation guard, not a duplicate of the
+    # attempt counter. Setting it to the same value as OTP_MAX_ATTEMPTS
+    # would make the two controls collide on ordinary, legitimate
+    # sequences (e.g. a user who exhausts one challenge via 5 wrong
+    # guesses, sees the generic failure message, and immediately starts
+    # a fresh login) — the rate limiter would then trigger first and
+    # mask the real OTP_CHALLENGE_LOCKED behaviour behind a generic 429
+    # instead. 15 gives comfortable headroom above the 5-attempt lock
+    # (and the few additional requests a legitimate recovery sequence
+    # needs) while still meaningfully throttling abuse: a genuine
+    # attacker would additionally need fresh pre-auth tokens to get
+    # more budget per challenge, and minting those is independently
+    # bounded by AUTH_LOGIN_RATE_LIMIT above.
+    AUTH_OTP_RATE_LIMIT: int = Field(default=15)
+    AUTH_OTP_RATE_WINDOW_SECONDS: int = Field(default=60)
+
     # --- Storage (LLD Section 21; DD-13: provider NOT YET DETERMINED) ---
     # STORAGE_BACKEND selects the StorageService implementation (see services/storage_service.py).
     STORAGE_BACKEND: str = Field(default="local")  # local (dev-only) | (future: cloud provider)

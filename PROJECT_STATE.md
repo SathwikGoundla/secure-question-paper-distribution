@@ -2231,3 +2231,116 @@ Direct source/diff review for this phase's changed files confirmed: no plaintext
 ## 20.14 Next phase
 **Phase 6E-1 — COMPLETE**
 **Phase 6E-2 — HTTP Security Headers + Authentication Rate Limiting — NOT STARTED**
+
+# 21. Phase 6E-2 — HTTP Security Headers + Authentication Rate Limiting
+
+## 21.1 Objective
+Close two more gaps from the Phase 6E security audit: (1) the API returned no defensive HTTP response headers at all, and (2) `POST /auth/login` and `POST /auth/otp/verify` had no bound on raw request volume (distinct from, and in addition to, the Phase 6E-1 OTP failed-guess counter). Scope was deliberately narrow: security headers and auth-endpoint rate limiting only, plus proof that the two phases' protections are genuinely independent controls. IDOR expansion and the secret-leakage regression suite remain **Phase 6E-3, NOT STARTED**.
+
+## 21.2 Inspection performed first (actual code authoritative)
+Confirmed the starting commit was `0fef211` (clean tree, matching the Phase 6E-1 report exactly). Re-ran the full Phase 6E-1 suite before changing anything (181/181 on SQLite and on a fresh real PostgreSQL 16). Read `app/main.py` (confirmed no existing middleware beyond `CORSMiddleware`, and that FastAPI's `/docs`/`/redoc`/`/openapi.json` are enabled at library defaults — important for CSP design, see 21.3), `app/config.py` (confirmed the existing `APP_ENV` setting, used to gate HSTS), `app/exceptions/base.py` and `handlers.py`, `app/api/v1/auth.py`, `app/services/auth_service.py`, `tests/conftest.py`. No discrepancy found between `PROJECT_STATE.md` and actual code for this phase's scope.
+
+## 21.3 Security Headers
+
+### Headers implemented (`app/middleware/security_headers.py`, registered once in `app/main.py`)
+- `X-Content-Type-Options: nosniff` — every response.
+- `X-Frame-Options: DENY` — every response.
+- `Referrer-Policy: strict-origin-when-cross-origin` — every response.
+- `Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()` — every response (this API has no legitimate use for any of these browser features).
+- `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` — every response **except** `/docs`, `/redoc`, `/openapi.json`.
+- `Strict-Transport-Security: max-age=63072000; includeSubDomains` — only under the double condition described below.
+
+### CSP reasoning
+This backend is a pure JSON + binary(PDF) API: it serves no HTML templates and mounts no `StaticFiles` directory anywhere (confirmed by inspection of `app/main.py`). The separate React frontend is built and served entirely independently — an HTTP response header on this API's own response cannot reach across and affect a different origin's already-loaded HTML page, so this CSP is defense-in-depth for this API's own responses, not a substitute for the frontend host's own CSP configuration (out of scope here). Because nothing here is ever meant to be loaded as a sub-resource or framed, the strictest available policy (`default-src 'none'; frame-ancestors 'none'`) is used — with one narrow, deliberate exemption: FastAPI's own interactive documentation (Swagger UI at `/docs`, ReDoc at `/redoc`, backed by `/openapi.json`) is enabled at its library defaults and loads CDN-hosted JS/CSS plus an inline bootstrap `<script>`, which cannot function under `default-src 'none'` without weakening the policy with `unsafe-inline`/an external `script-src` allowance for every other endpoint too. Rather than weaken the policy globally to keep an optional developer-facing docs page working, exactly those three paths skip the `Content-Security-Policy` header (every other header above still applies to them — verified by test). No `unsafe-inline`/`unsafe-eval` was added anywhere.
+
+### HSTS — exact gating condition
+Sent only when **both** `settings.APP_ENV == "production"` (the project's existing environment setting) **and** the specific request's `request.url.scheme == "https"`. A developer running `uvicorn app.main:app --reload` against `http://localhost` — in any `APP_ENV` value — never receives this header, so local HTTP development is never affected. (Per RFC 6797 §8.1, browsers already ignore this header over plain HTTP regardless; this backend does not rely on that alone and checks the scheme explicitly too.) Verified directly by test: absent over `http://` even with `APP_ENV=production`; present only when both conditions hold; absent again over `https://` with `APP_ENV` not `production`.
+
+## 21.4 Authentication Rate Limiting
+
+### Login (`POST /auth/login`)
+- **Limit:** `AUTH_LOGIN_RATE_LIMIT` = 5
+- **Window:** `AUTH_LOGIN_RATE_WINDOW_SECONDS` = 60
+- **Key:** `client_ip + ":" + normalized_username` (lowercased, trimmed) — not username alone (an attacker could otherwise spray many usernames from one IP, each starting a fresh per-username window) and not IP alone (which could over-penalize many legitimate users sharing one exam-centre/college NAT gateway). Checked via a FastAPI dependency, so it runs **before** any DB lookup or password verification — a 429 here carries zero information about whether the submitted username exists (verified by test).
+- **Response when exceeded:** HTTP 429, `{"error": {"message": "Too many authentication attempts. Please try again later.", "status_code": 429}}`, with a `Retry-After` header giving the actual remaining seconds (computed from the real window state, never fabricated).
+
+### OTP (`POST /auth/otp/verify`)
+- **Limit:** `AUTH_OTP_RATE_LIMIT` = 15 — deliberately **not** the same "5" used as a generic starting point, and not the same as `OTP_MAX_ATTEMPTS` (also 5, Phase 6E-1). See 21.5 for why.
+- **Window:** `AUTH_OTP_RATE_WINDOW_SECONDS` = 60
+- **Key:** `client_ip + ":" + "tok:" + sha256(pre_auth_token)[:16]` — a hash of the pre-auth token itself (never the raw token), not the underlying user identity. Each `POST /auth/login` call mints a brand-new pre-auth token, so each login's OTP challenge gets its **own** rate-limit budget, independent of any other challenge the same user requested earlier or later — matching the Phase 6E-1 "a new login creates a new usable challenge" semantics exactly.
+- **Response when exceeded:** identical shape/message/header pattern to login's 429 above.
+
+### Interaction with Phase 6E-1 (why a 429 never increments `failed_attempts`)
+The rate-limit check is wired as a FastAPI `dependencies=[Depends(...)]` entry on each route, which FastAPI resolves **before** the route function body runs. `auth_service.verify_otp_step2` (the only code that ever touches `otp_codes.failed_attempts`) is therefore simply never called on a rate-limited request — there is no shared code path, no flag to forget to check, no ordering race. This was proven, not just asserted: a dedicated mutation test which added an incorrect `failed_attempts` increment into the rate-limit-rejection code path was written specifically to confirm the test suite would catch such a regression if it were ever introduced (see 21.10, Mutation C) — it was caught immediately by 2 tests.
+
+`AUTH_OTP_RATE_LIMIT` (15) was chosen specifically higher than `OTP_MAX_ATTEMPTS` (5) so the two controls do not collide on an ordinary, legitimate sequence (a user who exhausts one challenge via 5 wrong guesses, sees the generic failure message, and immediately starts a fresh login) — with the limits equal, the rate limiter would trigger first and mask the real `OTP_CHALLENGE_LOCKED` behaviour behind a generic 429 instead of letting the Phase 6E-1 lock speak for itself. 15 gives comfortable headroom above the 5-attempt lock (and the handful of additional requests a legitimate recovery sequence needs) while still meaningfully throttling abuse — a genuine attacker additionally needs fresh pre-auth tokens to get more budget per challenge, and minting those is independently bounded by `AUTH_LOGIN_RATE_LIMIT`.
+
+## 21.5 Files Created
+- `backend/app/middleware/__init__.py`
+- `backend/app/middleware/security_headers.py`
+- `backend/app/security/rate_limiter.py`
+- `backend/tests/test_security_headers_and_rate_limiting.py`
+
+## 21.6 Files Modified
+- `backend/app/main.py` — registers `SecurityHeadersMiddleware` once, after `CORSMiddleware`.
+- `backend/app/api/v1/auth.py` — adds `enforce_login_rate_limit`/`enforce_otp_rate_limit` dependencies and the two module-level limiter singletons; route bodies (`login`, `verify_otp`) themselves are otherwise unchanged.
+- `backend/app/config.py` — adds `AUTH_LOGIN_RATE_LIMIT`, `AUTH_LOGIN_RATE_WINDOW_SECONDS`, `AUTH_OTP_RATE_LIMIT`, `AUTH_OTP_RATE_WINDOW_SECONDS`.
+- `backend/app/exceptions/base.py` — adds `TooManyRequestsException` (429) and a generic `extra_headers` mechanism on `AppException` (used for `Retry-After`; every pre-existing exception is unaffected, defaulting to no extra headers).
+- `backend/app/exceptions/handlers.py` — the one generic `AppException` handler now also applies `exc.extra_headers` to the response, if any are set.
+- `backend/.env.example` — documents the four new settings.
+- `PROJECT_STATE.md` — this section.
+
+## 21.7 Database Changes
+No database changes.
+
+## 21.8 Dependencies
+No new dependencies. The rate limiter is a ~100-line stdlib-only class (`threading`, `time`, `math`, `dataclasses`) — no `slowapi`, no Redis, no external store, consistent with the project's single-instance B.Tech deployment scope.
+
+## 21.9 Tests
+All 24 in `backend/tests/test_security_headers_and_rate_limiting.py`:
+
+**Security headers (10):** each of the five standard headers present on a normal response; HSTS absent over plain HTTP regardless of `APP_ENV`; HSTS present only under the exact double condition (and absent again if either half is false); headers do not break a normal authenticated JSON response; headers do not break PDF retrieval (the actual PDF bytes are still delivered correctly, alongside the headers); headers are present even on a 401 error response; `/docs` is exempt from CSP but keeps every other header.
+
+**Login rate limiting (6):** below-limit requests succeed normally; the request past the limit returns 429 with the generic message and no token in the body; the window resets after expiry (via a controllable fake clock, no real sleeps); two different usernames from the same TestClient "IP" are independently limited; a rate-limited login for a non-existent username returns the exact same 429 as for a real user (no existence oracle); a rate-limited login issues no token.
+
+**OTP rate limiting (6):** below-limit requests reach real OTP verification logic; exceeding the limit returns 429; the window resets after expiry while the underlying Phase 6E-1 lock correctly remains in force (proving independence in both directions); a rate-limited request does not increment `failed_attempts`; the Phase 6E-1 lock still triggers correctly with the rate limiter active; the correct OTP still succeeds when neither control is triggered.
+
+**Mandatory interaction test (1):** `test_rate_limiter_and_otp_lock_are_independent_controls` — follows the exact 7-step sequence specified for this phase (create challenge → exhaust `failed_attempts` → verify the counter → continue to trip the rate limiter → verify the 429 did not touch the counter → advance past the rate window and verify the challenge is still locked → verify a genuinely fresh challenge from a new login still works normally).
+
+**Error-response regression (1):** confirms security headers are present even on a 401, not just 200s.
+
+## 21.10 Test Results
+- **Targeted new tests:** 24/24 passed.
+- **Full backend suite (SQLite):** **205/205 passed** (181 pre-existing/6E-1 + 24 new), 209.24s.
+- **Full backend suite (real PostgreSQL 16):** **205/205 passed**, 205.36s.
+- **Frontend tests:** not run — no frontend file was touched.
+- **TypeScript / build:** not run — no frontend file was touched.
+- **Order-independence:** the new file's tests were run in pytest's natural order, fully reversed, and interleaved with three unrelated existing test files in a different collection position — all passed in every arrangement (no installed random-order plugin was added, consistent with the Phase 6E-1 precedent and this phase's own no-new-dependency rule).
+- **Security scan:** `git diff` of every changed file, and a direct scan of every new file, for `print(`, `console.log`, hard-coded secrets/passwords, PEM markers — none found. Confirmed no `.env` file was touched (only `.env.example`), no frontend/blockchain file was touched (`git diff --stat -- frontend blockchain` empty), no stray `__pycache__`/build artifact was staged.
+
+## 21.11 Mutation Testing
+Three controlled regressions, each introduced, confirmed caught, then fully reverted (byte-identical via `diff` against a pre-mutation backup) before the next:
+- **Mutation A** — commented out the `register_security_headers(app)` call in `main.py` (security headers middleware effectively disabled). **Caught by 9 tests** (every header/CSP/HSTS/docs-exemption test).
+- **Mutation B** — replaced the login rate limiter's `if not _login_limiter.allow(key):` check with `if False:` (rate limit silently disabled). **Caught by 5 tests** (all the login rate-limit tests).
+- **Mutation C** — injected code into the OTP rate-limit-rejection path that incorrectly increments `otp_codes.failed_attempts` before raising 429 (simulating exactly the regression this phase's independence guarantee must prevent). **Caught by 2 tests** — `test_otp_rate_limited_request_does_not_increment_failed_attempts` and the mandatory `test_rate_limiter_and_otp_lock_are_independent_controls`.
+
+All three mutations were fully reverted; the complete 205-test suite was re-run clean afterward.
+
+## 21.12 Security Review
+Confirmed via source/diff review: no secrets, passwords, OTP values, JWTs, or pre-auth tokens appear in any log line, rate-limit key, or response body (the OTP rate-limit key uses a truncated SHA-256 hash of the token, never the raw value; the two `logger.warning` calls added log only the client IP, nothing else). No debug prints, no accidental `.env` changes, no hard-coded production values, no unbounded in-memory growth (the rate limiter sweeps expired entries once its tracked-key count passes a fixed threshold), no new unsafe global/shared mutable state beyond the two intentionally-module-level, thread-lock-guarded limiter singletons (the same pattern the codebase already used for `auth_service._otp_provider`).
+
+## 21.13 Known Limitations
+- The rate limiter is in-process/single-instance by design and documents this explicitly in its own module docstring: running this application with more than one worker process (`uvicorn ... --workers N`) or behind a load-balanced multi-replica deployment would give each process/replica its own independent counters, making the effective limit `(configured limit × process/replica count)`, not a true global limit. This is an accepted, documented trade-off for the project's current single-instance B.Tech deployment scope, not a hidden one.
+- `AUTH_OTP_RATE_LIMIT` (15) is deliberately higher than `OTP_MAX_ATTEMPTS` (5) for the reasons in 21.4/21.5 — an operator who manually sets `AUTH_OTP_RATE_LIMIT` at or below `OTP_MAX_ATTEMPTS` in their own deployment would reintroduce the exact collision this phase's chosen defaults avoid (the rate limiter would mask the OTP lock's own, more specific, response). This is a configuration-time risk to document for anyone changing the defaults, not a code defect.
+- CORS remains unchanged (`allow_methods=["*"]`, `allow_headers=["*"]`) — explicitly out of scope for this phase per the task brief; still recorded as a LOW finding for a future, separate pass if desired.
+- Everything else from the original Phase 6E audit (IDOR test expansion, the general secret-leakage regression suite, account lockout) remains deferred to Phase 6E-3 by design.
+
+## 21.14 Git
+- Commit message: `Phase 6E-2 checkpoint: security headers and auth rate limiting`
+- Branch: `master`
+- Working tree after commit: clean
+- Pushed to GitHub: **NO**
+
+## 21.15 Next phase
+**Phase 6E-2 — COMPLETE**
+**Phase 6E-3 — IDOR + Secret-Leakage Regression Testing — NOT STARTED**

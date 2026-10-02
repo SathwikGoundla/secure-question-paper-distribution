@@ -26,10 +26,17 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppException)
     async def handle_app_exception(request: Request, exc: AppException) -> JSONResponse:
         logger.warning("AppException on %s %s: %s", request.method, request.url.path, exc.message)
-        return JSONResponse(
+        response = JSONResponse(
             status_code=exc.status_code,
             content=_error_body(exc.message, exc.status_code),
         )
+        # Phase 6E-2: a small, explicit allow-list of extra headers an
+        # exception may request (currently only Retry-After, set by
+        # TooManyRequestsException). Never anything derived from
+        # internal state, secrets, or tokens — see AppException.__init__.
+        if exc.extra_headers:
+            response.headers.update(exc.extra_headers)
+        return response
 
     @app.exception_handler(Exception)
     async def handle_unexpected_exception(request: Request, exc: Exception) -> JSONResponse:

@@ -15,8 +15,15 @@ class AppException(Exception):
     status_code: int = 500
     default_message: str = "An unexpected error occurred."
 
-    def __init__(self, message: str | None = None):
+    def __init__(self, message: str | None = None, extra_headers: dict[str, str] | None = None):
         self.message = message or self.default_message
+        # Phase 6E-2 addition: lets a specific exception (e.g.
+        # TooManyRequestsException's Retry-After) attach safe,
+        # non-sensitive extra response headers without every other
+        # exception type or the generic handler needing to know about
+        # it. Empty by default — every exception from before this
+        # phase behaves exactly as before.
+        self.extra_headers: dict[str, str] = extra_headers or {}
         super().__init__(self.message)
 
 
@@ -78,3 +85,30 @@ class UnsupportedOperationException(AppException):
     """
     status_code = 501
     default_message = "This operation is not supported by the currently configured backend."
+
+
+class TooManyRequestsException(AppException):
+    """
+    Phase 6E-2 addition. Raised by the authentication rate limiter
+    (app/security/rate_limiter.py) when POST /auth/login or
+    POST /auth/otp/verify is called more than the configured number of
+    times, for the same client-identity key, within the configured
+    window. Maps to HTTP 429 Too Many Requests.
+
+    The message is deliberately generic and identical regardless of
+    WHY the limit was hit (unknown username, wrong password, wrong
+    OTP, exhausted OTP challenge, ...) — it must never be usable to
+    infer anything about account existence or OTP/password
+    correctness. retry_after_seconds, when known, is surfaced only via
+    the standard Retry-After response header (set in
+    exceptions/handlers.py from extra_headers), never in the JSON body
+    text itself.
+    """
+    status_code = 429
+    default_message = "Too many authentication attempts. Please try again later."
+
+    def __init__(self, message: str | None = None, retry_after_seconds: int | None = None):
+        extra_headers = {}
+        if retry_after_seconds is not None and retry_after_seconds > 0:
+            extra_headers["Retry-After"] = str(retry_after_seconds)
+        super().__init__(message, extra_headers=extra_headers)

@@ -16,6 +16,7 @@ from app.api.v1.router import api_router
 from app.config import get_settings
 from app.exceptions.handlers import register_exception_handlers
 from app.logging_config import configure_logging
+from app.middleware.security_headers import register_security_headers
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -41,6 +42,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Phase 6E-2: X-Content-Type-Options, X-Frame-Options, Referrer-Policy,
+# Permissions-Policy, Content-Security-Policy, and environment-gated
+# HSTS on every response (app/middleware/security_headers.py). Added
+# once, here — see that module's docstring for exactly what each
+# header does and does not affect.
+register_security_headers(app)
 
 register_exception_handlers(app)
 
