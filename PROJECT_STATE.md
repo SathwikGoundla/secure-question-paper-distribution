@@ -2344,3 +2344,101 @@ Confirmed via source/diff review: no secrets, passwords, OTP values, JWTs, or pr
 ## 21.15 Next phase
 **Phase 6E-2 — COMPLETE**
 **Phase 6E-3 — IDOR + Secret-Leakage Regression Testing — NOT STARTED**
+
+# 22. Phase 6E-3 — IDOR + Secret-Leakage Regression Testing
+
+## 22.1 Objective
+Prove, through strong automated backend regression tests (never frontend-only assumptions), that (1) one examination centre can never access or manipulate another examination centre's protected resources, and (2) authentication/cryptographic secrets never leak through API responses, logs, audit events, security events, serialization, or exception handling. Test-only work; production code was changed only transiently and exclusively for mutation-testing purposes (see 22.9), never as a lasting fix, since no genuine vulnerability was found.
+
+## 22.2 Inspection performed first (actual code authoritative)
+Confirmed the starting commit was `b2a4601` (clean tree). Re-ran the Phase 6E-2 suite before changing anything (205/205). Read `app/api/deps.py`, `app/api/v1/papers.py`, `app/api/v1/admin.py`, `app/api/v1/audit.py`, `app/services/paper_service.py` (full `list_papers`/`get_paper_metadata`/`authorize_centre`/`retrieve_paper`), `app/services/authorization_service.py`, `app/services/crypto_service.py`, `app/security/otp.py`, `app/exceptions/handlers.py`, `app/schemas/*.py`, `app/models/*.py`, and `tests/conftest.py`'s fixture/helper patterns. No discrepancy found between `PROJECT_STATE.md` and actual code for IDOR/authorization behavior. One discrepancy was found and is recorded precisely in 22.6 (the actual retrieval route is `GET /papers/{id}/retrieve`, not `POST`, contrary to an earlier phase's informal prompt text — the real route was used throughout, per "trust actual code").
+
+## 22.3 IDOR Coverage
+Two genuinely distinct examination centres (Centre A, Centre B — separate `exam_centres` rows, separate `users` rows, separate real login+OTP sessions) were created via a local test factory (`tests/test_idor_cross_centre.py::_make_centre_principal`), since `conftest.py`'s own `exam_centre_principal` fixture only ever creates one centre. 23 tests in `tests/test_idor_cross_centre.py`:
+
+- **Paper list scoping** — Centre A's `GET /papers` list contains Paper A and never Paper B; Centre B's contains Paper B and never Paper A.
+- **Paper detail** — Centre A requesting Paper B's metadata (and vice versa) gets 403 with the existing generic message, no subject/hash/schedule leaked in the response body.
+- **Paper retrieval** — Centre A requesting Paper B's file (and vice versa) gets 403, never PDF bytes, never a `application/pdf` content-type. A dedicated test also proves authorization is checked (and fails) independently of time-lock, using a paper that is simultaneously unauthorized AND still time-locked, confirming the existing check order was not weakened to make these tests pass.
+- **Paper authorization endpoint** — confirmed Admin-only: both a Centre user and an Auditor get 403 attempting `POST /papers/{id}/authorize`.
+- **Centre management** — `GET/POST /admin/centres`, `GET/PATCH /admin/centres/{id}` confirmed Admin-only: both Centre and Auditor denied.
+- **Dashboard** — `GET /admin/dashboard/summary` confirmed Admin-only: both Centre and Auditor denied; Admin confirmed allowed.
+- **Audit logs** — `GET /audit/logs` confirmed denied to Centre even with a `centre_id` filter pointed at a different centre (proving the RBAC gate runs before filter parsing matters); Admin and Auditor both confirmed allowed.
+- **Security/monitoring events** — same shape as audit logs, same result.
+- **Object-ID coverage** — documented (module docstring of the test file) that every real client-supplied-ID endpoint discovered by inspection (`paper_id`, `centre_id` as both a path param and a query filter) is covered by the tests above; no `user_id`- or `session_id`-accepting endpoint exists anywhere in the API for any non-admin caller, so none was invented.
+- **Explicit UUID substitution** — Centre A's valid token combined with Centre B's real paper_id, exercised across `/papers/{id}`, `/papers/{id}/retrieve`, `/papers/{id}/status` in one assertion set; plus a dedicated test for a UUID that was never registered as any paper at all (confirms 404, not 403 — see 22.6 for the documented, pre-existing, out-of-scope distinguishability this reveals).
+
+**No working IDOR was found.** Every cross-centre attempt was correctly rejected by existing backend authorization code.
+
+## 22.4 Secret-Leakage Coverage
+29 tests in `tests/test_secret_leakage.py`:
+- **Password** — not in a successful or failed login response body; not in application logs during success or failure (a distinctive per-test password is asserted absent from `caplog.text`, alongside the user's stored `password_hash`).
+- **OTP** — not in verify-success or verify-failure response bodies, nor the stored `otp_hash`; a precise logging test (see 22.5) distinguishes the documented dev-delivery log line from every other code path, which is confirmed to never log it.
+- **JWT / pre-auth token** — not in logs across a full login→OTP→authenticated-request flow; the stored `auth_sessions.jwt_reference` is confirmed to be the token's `jti` claim only, never the raw bearer token (LLD DD-06, verified rather than assumed); malformed/garbage Authorization headers, invalid pre-auth tokens, and syntactically-JWT-shaped-but-invalid tokens are all confirmed never echoed back in any error response.
+- **Master encryption key** — the real (random, test-session-only) `QUESTION_PAPER_MASTER_KEY` value is asserted absent from every response body and all captured logs across a full register → metadata → authorize → retrieve → denied-retrieve flow.
+- **Per-paper wrapped DEK / nonce** — `papers.wrapped_dek` and `papers.file_nonce` (the real stored, encrypted key material) are asserted absent from every paper-related endpoint's response body (register, metadata, status, list, retrieve). The raw, unwrapped DEK itself is not separately testable this way since it is architecturally never persisted anywhere (exists only transiently inside `crypto_service.encrypt_paper`'s local scope) — this is noted explicitly in the test's own docstring rather than silently assumed.
+- **Exception-response safety** — malformed request body (422), invalid UUID path param (422), missing resource (404), no-Authorization-header (401) all confirmed free of stack traces / file paths. A dedicated test injects a `RuntimeError` with a deliberately sensitive-looking message (fake DB password, fake SQL, fake AES key) into a real code path for exactly one request (via `monkeypatch`, auto-reverted) to prove the catch-all 500 handler redacts **any** exception message, not merely the already-safe, hand-written ones used elsewhere in the app.
+- **Audit/security-event safety** — a representative flow (failed login, OTP failure+lock, paper registration, authorization, successful retrieval, a denied cross-resource attempt) is driven, then every newly-created `audit_events`/`security_events` row's structured columns are scanned for forbidden substrings (password/otp_hash/wrapped_dek/master/AES/Bearer).
+- **Response-schema structural check** — 10 response Pydantic models (`LoginResponse`, `OtpVerifyResponse`, `CurrentUserResponse`, `PaperMetadataResponse`, `PaperListItemResponse`, `PaperStatusResponse`, `PaperRegisterResponse`, `CentreResponse`, `AuditEventResponse`, `SecurityEventResponse`) are parametrically checked to confirm none of them *declare* a forbidden field name (`password`, `password_hash`, `otp_hash`, `wrapped_dek`, `file_nonce`, `file_reference`, `jwt_reference`) at all — a structural guarantee that is stronger than a black-box response check alone, since it would catch a future schema change before it could ever be exercised by a request.
+
+**No secret-leakage vulnerability was found.**
+
+## 22.5 DevConsoleOTPProvider Finding (development-only OTP delivery vs. production secret leakage)
+Confirmed by direct inspection of `app/security/otp.py` and `app/services/auth_service.py`:
+- `DevConsoleOTPProvider.deliver()` **does** log the plaintext OTP, via `logger.warning("[DEV-ONLY OTP DELIVERY] user=%s otp=%s ...")`. This is the **only** place in the entire backend that ever logs an OTP value (confirmed by a codebase-wide grep for OTP-adjacent log/print calls — no other match exists).
+- This is the project's own, already-documented, explicit placeholder delivery mechanism — not a Phase 6E-3 discovery and not a regression. The class's own docstring says "NOT an approved delivery channel — replace before any real use"; SRS OQ-4 and LLD DD-12 record the real delivery channel as NOT YET DETERMINED.
+- **Precisely stated finding, not glossed over:** `DevConsoleOTPProvider` is currently the **only** `OTPProvider` implementation that exists in the codebase, and `app/services/auth_service.py` instantiates and uses it **unconditionally** (`_otp_provider = DevConsoleOTPProvider()`, module-level, no branch). There is **no** `APP_ENV`-based or `OTP_DELIVERY_CHANNEL`-based selection logic implemented anywhere — running this application with `APP_ENV=production` today would still use `DevConsoleOTPProvider` and would still log the OTP. "Development-only" describes the documented **intent**, not an enforced **environment gate** — these are two different claims, and only the first is currently true in code.
+- Implementing a real delivery channel or environment-based provider selection is "new authentication architecture" and was correctly treated as out of Phase 6E-3's explicit scope; it is recorded here as a known limitation (22.11), not silently fixed.
+- The test suite (`test_otp_appears_in_logs_exactly_once_at_the_documented_dev_delivery_point`) does **not** claim the OTP never appears in logs (that would be false and exactly the kind of fabrication the brief warned against). It instead proves the true, meaningful, and actually-tested security boundary: the OTP appears in logs **exactly once**, **exactly** at that one documented line (asserted by logger name `app.security.otp` and message content), and **nowhere else** — not during successful verification, failed verification, lockout, rate-limiting, any audit/security event, or any API response. That is the boundary Phase 6E-3 is responsible for; the separate, already-tracked `OTP_DELIVERY_CHANNEL` open question is explicitly out of scope.
+
+## 22.6 Other Documented (Pre-Existing, Not-Fixed) Observations
+- **403 vs. 404 distinguishability:** `paper_service.get_paper_by_id_or_404()` always runs before the authorization check in `get_paper_metadata()`/`retrieve_paper()`, so an *existing* paper the caller is unauthorized for returns 403, while a UUID that was never registered as *any* paper returns 404 — meaning a caller can distinguish "this paper_id exists" from "this paper_id was never registered," though never any paper subject/hash/schedule/content. This is pre-existing Phase 3/4 behavior, confirmed and exercised by `test_unknown_paper_id_returns_404_not_403`, not a Phase 6E-3 regression, and changing it was out of this phase's explicit scope ("do not automatically modify production code" without a demonstrated genuine vulnerability — this is a minor, low-severity existence-disclosure, not a content/metadata leak).
+- **Route name correction:** the originating Phase 6E-3 brief referred to `POST /papers/{id}/retrieve`; the actual, implemented route (confirmed in `app/api/v1/papers.py`) is `GET /papers/{id}/retrieve`. The real route was used throughout, per "trust actual code."
+
+## 22.7 Production Code Changes
+**No lasting production code changes were made.** `app/services/paper_service.py` and `app/services/auth_service.py` were each temporarily mutated, one at a time, strictly for mutation testing (22.9), and fully reverted — confirmed byte-identical via `diff` against pre-mutation backups before moving to the next mutation, and confirmed again via `git diff` showing zero changes to any tracked file at the end of this phase.
+
+## 22.8 Files Created
+- `backend/tests/test_idor_cross_centre.py`
+- `backend/tests/test_secret_leakage.py`
+
+## 22.9 Files Modified
+None (permanently). `PROJECT_STATE.md` (this section) is the only lasting modification.
+
+## 22.10 Tests Added
+52 new tests: 23 in `test_idor_cross_centre.py`, 29 in `test_secret_leakage.py`.
+
+## 22.11 Test Results
+- **IDOR tests:** 23/23 passed.
+- **Secret-leakage tests:** 29/29 passed.
+- **Full backend suite (SQLite):** **257/257 passed** (205 pre-existing/6E-1/6E-2 + 52 new). Run in three sequential batches (115 + 98 + 44) due to a 300-second-per-command tool constraint in this session, not due to any test instability — each batch green independently, both before and after the mutation-testing reverts (post-revert re-confirmation: 115/115, 98/98, 44/44).
+- **Full backend suite (real PostgreSQL 16):** **257/257 passed**, also in three batches (115 + 98 + 44). One transient environment hiccup occurred mid-session (the sandbox's PostgreSQL service was found stopped between two tool calls, producing `OperationalError`s on a batch) — this was a session/environment interruption, not a code issue; PostgreSQL was restarted, confirmed `SELECT 1` reachable, and the full three-batch run was repeated cleanly from a freshly-recreated schema, passing 257/257.
+- **Order-independence:** both new files run fully reversed (23/23 and 29/29 respectively) and interleaved with three unrelated existing files in a different collection position (115/115 combined) — all passed in every arrangement. No random-order plugin was added (consistent with this phase's own instruction not to add `pytest-randomly`).
+- **Compile check:** `python -m py_compile` over every file in `app/`, `scripts/`, and `tests/` — clean.
+- **Security scan:** `git diff --stat` confirms zero tracked-file changes; a scan of both new test files for `print(`/`console.log`/PEM markers/hard-coded-production-secret patterns found nothing; every password/credential literal used in the new tests is a clearly-labeled, randomly-suffixed, test-only value (e.g. `"Test-OTP-Log-Password-123!"`), never a real or production-shaped secret; no `.env` file was touched; `frontend/` and `blockchain/` are confirmed untouched (`git diff --stat -- frontend blockchain` empty).
+
+## 22.12 Mutation Testing
+Three mutations, each introduced, confirmed caught, then fully reverted (byte-identical via `diff`) before the next:
+- **Mutation A** — in `paper_service.retrieve_paper()`, replaced the centre-authorization `if` condition with `if False:` (bypassing the check entirely). **Caught by 4 tests** in `test_idor_cross_centre.py` (the cross-centre retrieval tests and the UUID-substitution test).
+- **Mutation B** — in `paper_service.list_papers()`, removed the `Examination Centre` branch's join/filter against `paper_authorizations` (replaced with `pass`), so a centre user's paper list would no longer be scoped at all. **Caught by 3 tests** — the new `test_paper_list_is_centre_scoped`, plus two **pre-existing** tests in `test_paper_list_api.py` (`test_exam_centre_sees_only_authorized_papers`, `test_exam_centre_with_no_authorizations_sees_empty_list`) — confirming this scoping already had some regression protection even before Phase 6E-3, which this phase's two-distinct-centre test now protects more directly.
+- **Mutation C** — in `auth_service.login_step1()`, added one line logging the plaintext submitted password via `logger.warning`. **Caught by exactly 1 targeted test** (`test_password_not_logged_on_success_or_failure`); the rest of `test_secret_leakage.py` (28 other tests) remained green, confirming the mutation's blast radius was exactly as expected — narrow and specific, not incidentally masked by or bleeding into unrelated tests.
+
+All three mutations were fully reverted; `git diff` on both affected files is empty; the complete 257-test suite was re-run clean on both SQLite and PostgreSQL afterward (22.11).
+
+## 22.13 Security Review
+Confirmed via source/diff review: the two new test files introduce no debug endpoints, no secret-dump helpers, no authentication bypasses, no test-only production routes, and no logging added for the purpose of exposing secrets (the one place a secret is deliberately constructed in a test — `test_unhandled_internal_exception_never_leaks_its_message`'s fake sensitive string — exists solely to prove the response does NOT contain it, and is never logged or returned itself). No real password, OTP, JWT, pre-auth token, master key, or wrapped-DEK value appears anywhere in either new file; every credential-shaped literal is a clearly fake, randomly-suffixed, test-only value. No `.env` file was touched. No production code shows any net change.
+
+## 22.14 Known Limitations
+- `DevConsoleOTPProvider` logs the plaintext OTP unconditionally (no environment gate exists in code today) — a pre-existing, documented, explicitly out-of-scope-for-this-phase limitation (22.5), not a Phase 6E-3 regression. Resolving it requires implementing a real OTP delivery channel and/or environment-based provider selection, which is new authentication architecture and belongs to a future, separately-scoped phase.
+- An existing-but-unauthorized paper_id returns 403 while a never-registered paper_id returns 404 — a minor, low-severity existence-disclosure (22.6), pre-existing since Phase 3/4, documented and tested here rather than changed, consistent with this phase's "do not modify production code without a demonstrated genuine vulnerability" rule.
+- CORS (`allow_methods=["*"]`, `allow_headers=["*"]`) remains unchanged — out of this phase's scope, already recorded as a LOW finding in the original Phase 6E audit.
+- Account lockout, Redis-backed distributed rate limiting, and further authentication-architecture changes remain out of scope for all of Phase 6E per the original audit's "Explicitly NOT Recommended" list.
+
+## 22.15 Git
+- Commit message: `Phase 6E-3 checkpoint: IDOR and secret leakage regression tests`
+- Branch: `master`
+- Working tree after commit: clean
+- GitHub remote: **none configured in this environment** (`git remote -v` returns empty — this repository has no `origin` and no credentials configured here). The commit is created locally only, exactly as every prior Phase 6E-x checkpoint in this project was; it could not be pushed to GitHub from this session because there is no remote to push to, not due to any policy choice in this phase.
+
+## 22.16 Next phase
+**Phase 6E-3 — COMPLETE**
+**Phase 6E — READY FOR FINAL REVIEW** (6E-1 COMPLETE, 6E-2 COMPLETE, 6E-3 COMPLETE; a human/guide review of the full 6E security-hardening arc is the natural next step before any new feature phase begins)
