@@ -154,6 +154,23 @@ export function authorizeCentre(
   });
 }
 
+/**
+ * POST /api/v1/papers/{paper_id}/revoke — Admin-only. Phase 6F addition.
+ * Revokes a previously granted centre authorization for this paper (the
+ * PostgreSQL-side counterpart of LLD CC-03 RevokeCentre). Reuses the
+ * same request/response shapes as authorizeCentre above — the backend
+ * does not define separate ones for this endpoint either.
+ */
+export function revokeCentre(
+  paperId: string,
+  body: PaperAuthorizeRequest,
+): Promise<PaperAuthorizeResponse> {
+  return apiRequest<PaperAuthorizeResponse>(`/papers/${paperId}/revoke`, {
+    method: "POST",
+    body,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Phase 6C — real business logic. Every route below was a 501 stub as of
 // Phase 6B; app/api/v1/admin.py and audit.py now implement real,

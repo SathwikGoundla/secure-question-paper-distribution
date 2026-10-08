@@ -352,7 +352,26 @@ def get_paper_metadata(db: Session, current_user: CurrentUser, paper_id: uuid.UU
 def authorize_centre(
     db: Session, admin_user: CurrentUser, paper_id: uuid.UUID, centre_id: uuid.UUID
 ) -> PaperAuthorization:
-    """LLD API-06 (POST /papers/{paper_id}/authorize). Admin-only."""
+    """
+    LLD API-06 (POST /papers/{paper_id}/authorize). Admin-only.
+
+    Phase 6F fix: the existing-row lookup below now matches on
+    (paper_id, centre_id) ALONE — not also is_revoked == False as it
+    did before Phase 6F. Before this fix, re-authorizing a centre
+    whose prior authorization had been revoked (see
+    revoke_centre_authorization, added in Phase 6F) would not find
+    that revoked row (the old query excluded it), fall through to the
+    INSERT branch, and collide with the real database-level
+    uq_paper_authorizations_paper_centre UniqueConstraint
+    (models/paper_authorization.py) on the SAME (paper_id, centre_id)
+    pair — raising an unhandled IntegrityError (surfacing as a bare
+    500) instead of the clean re-authorization an Admin would expect.
+    This was latent and untestable before Phase 6F because no code
+    path could ever create a revoked row in the first place. It is
+    exercised directly by
+    tests/test_paper_authorization_revocation.py::
+    test_reauthorizing_after_revocation_succeeds_instead_of_500ing.
+    """
     get_paper_by_id_or_404(db, paper_id)  # 404 if the paper itself doesn't exist
 
     centre = db.get(ExamCentre, centre_id)
@@ -364,12 +383,30 @@ def authorize_centre(
         .filter(
             PaperAuthorization.paper_id == paper_id,
             PaperAuthorization.centre_id == centre_id,
-            PaperAuthorization.is_revoked == False,  # noqa: E712
         )
         .first()
     )
     if existing is not None:
-        return existing  # idempotent: authorizing an already-authorized centre is not an error
+        if not existing.is_revoked:
+            return existing  # idempotent: authorizing an already-authorized centre is not an error
+
+        # Re-activate the previously revoked row rather than inserting
+        # a second row for the same (paper_id, centre_id) pair, which
+        # the unique constraint would reject (see docstring above).
+        existing.is_revoked = False
+        existing.authorized_by = admin_user.user_id
+        existing.authorized_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(existing)
+
+        record_audit_event(
+            db,
+            "CENTRE_AUTHORIZATION_GRANTED",
+            actor_id=admin_user.user_id,
+            outcome="SUCCESS",
+            paper_id=paper_id,
+        )
+        return existing
 
     authorization = PaperAuthorization(
         paper_id=paper_id,
@@ -391,6 +428,75 @@ def authorize_centre(
     )
 
     return authorization
+
+
+def revoke_centre_authorization(
+    db: Session, admin_user: CurrentUser, paper_id: uuid.UUID, centre_id: uuid.UUID
+) -> PaperAuthorization:
+    """
+    Phase 6F — PostgreSQL-side counterpart of LLD CC-03 (RevokeCentre).
+    Admin-only. Marks a currently-ACTIVE authorization as revoked
+    (is_revoked=True) rather than deleting the row, preserving audit
+    history exactly as authorize_centre's own soft-state design
+    already does for grants (LLD Section 7.5's is_revoked column was
+    added for precisely this purpose but, before Phase 6F, nothing in
+    the codebase ever set it to True).
+
+    No blockchain call is attempted here, deliberately, mirroring
+    authorize_centre's own existing (pre-Phase-6F) design: CC-03
+    RevokeCentre, like CC-02 AuthorizeCentre, is UNSUPPORTED by the
+    currently deployed Fabric chaincode (see
+    fabric_blockchain_service.py's support matrix) — calling it would
+    always raise UnsupportedOperationException under the Fabric
+    backend, so — consistent with how authorize_centre already
+    handles this exact situation — no call is made at all rather than
+    adding dead, always-failing code.
+
+    Revoking a (paper_id, centre_id) pair that has no currently-active
+    authorization (never authorized, or already revoked) is treated as
+    a client error (400), not a silent no-op — unlike authorize_centre's
+    idempotent re-grant, "revoke" implies undoing something that must
+    actually exist to be undone; silently succeeding here could mask a
+    caller's mistaken belief that access was actually just revoked.
+
+    Effect on retrieval: no additional code change was needed for this
+    to take effect — app/services/authorization_service.py's
+    is_centre_authorized_for_paper() (used by retrieve_paper,
+    get_paper_metadata, and list_papers' centre-scoping) already
+    filters on is_revoked == False, so a revoked centre is immediately,
+    automatically denied everywhere that check is used.
+    """
+    get_paper_by_id_or_404(db, paper_id)
+
+    centre = db.get(ExamCentre, centre_id)
+    if centre is None:
+        raise ValidationFailedException("Unknown centre_id.")
+
+    existing = (
+        db.query(PaperAuthorization)
+        .filter(
+            PaperAuthorization.paper_id == paper_id,
+            PaperAuthorization.centre_id == centre_id,
+            PaperAuthorization.is_revoked == False,  # noqa: E712
+        )
+        .first()
+    )
+    if existing is None:
+        raise ValidationFailedException("This centre is not currently authorized for this paper.")
+
+    existing.is_revoked = True
+    db.commit()
+    db.refresh(existing)
+
+    record_audit_event(
+        db,
+        "CENTRE_AUTHORIZATION_REVOKED",
+        actor_id=admin_user.user_id,
+        outcome="SUCCESS",
+        paper_id=paper_id,
+    )
+
+    return existing
 
 
 def retrieve_paper(db: Session, current_user: CurrentUser, paper_id: uuid.UUID) -> bytes:

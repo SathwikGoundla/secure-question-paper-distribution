@@ -154,6 +154,35 @@ def authorize_centre(
     )
 
 
+@router.post(
+    "/{paper_id}/revoke",
+    response_model=PaperAuthorizeResponse,
+)
+def revoke_centre(
+    paper_id: UUID,
+    body: PaperAuthorizeRequest,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(require_role("Admin")),
+) -> PaperAuthorizeResponse:
+    """
+    Phase 6F. Admin-only. Revokes a previously granted centre
+    authorization for this paper — the PostgreSQL-side counterpart of
+    LLD CC-03 (RevokeCentre; see paper_service.revoke_centre_authorization
+    for why no blockchain call is attempted, exactly mirroring
+    authorize_centre's existing, pre-Phase-6F treatment of its own
+    unsupported chaincode counterpart, CC-02). Reuses the same request/
+    response shapes as POST /{paper_id}/authorize — no new schema was
+    needed for this endpoint.
+    """
+    authorization = paper_service.revoke_centre_authorization(db, current_user, paper_id, body.centre_id)
+    return PaperAuthorizeResponse(
+        authorization_id=authorization.authorization_id,
+        paper_id=authorization.paper_id,
+        centre_id=authorization.centre_id,
+        authorized_at=authorization.authorized_at,
+    )
+
+
 @router.get("/{paper_id}/retrieve")
 def retrieve_paper(
     paper_id: UUID,

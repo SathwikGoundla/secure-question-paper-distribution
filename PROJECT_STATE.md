@@ -2442,3 +2442,65 @@ Confirmed via source/diff review: the two new test files introduce no debug endp
 ## 22.16 Next phase
 **Phase 6E-3 — COMPLETE**
 **Phase 6E — READY FOR FINAL REVIEW** (6E-1 COMPLETE, 6E-2 COMPLETE, 6E-3 COMPLETE; a human/guide review of the full 6E security-hardening arc is the natural next step before any new feature phase begins)
+
+# 23. Phase 6F — Examination-Centre Authorization Revocation
+
+## 23.1 Objective
+Close the one genuinely incomplete step found in the "Exam Centre Authorization" part of the paper lifecycle: an Admin could grant a centre access to a paper, but there was no way to withdraw it. Selected by inspection of the repository, not assumed: `paper_authorizations.is_revoked` and `BlockchainService.revoke_centre()` (abstract + Stub implementation) already existed, `is_centre_authorized_for_paper`, `list_papers` and retrieval already filter on `is_revoked == False`, yet **no API endpoint, no service function and no audit event ever set `is_revoked = True`** (LLD CC-03 was designed but never wired).
+
+Inspection also surfaced a latent defect that was untestable until a revoked row could exist: `PaperAuthorization` has a real DB-level `UniqueConstraint(paper_id, centre_id)` (not including `is_revoked`), but `authorize_centre()`'s existing-row lookup only matched non-revoked rows. Re-authorizing a revoked pair would therefore fall through to an INSERT and violate the constraint (unhandled IntegrityError → bare 500). Proven by a regression test (see 23.9, Mutation 1) and fixed.
+
+## 23.2 Implementation status
+IMPLEMENTED and VERIFIED (backend + minimal admin UI), against SQLite and a real local PostgreSQL 16. NOT verified against a live Hyperledger Fabric network (none available in this environment).
+
+## 23.3 Files created
+- `backend/tests/test_paper_authorization_revocation.py` (14 tests)
+- `frontend/src/pages/admin/papers/PaperDetailPage.test.tsx` (4 tests)
+
+## 23.4 Files modified
+- `backend/app/services/paper_service.py` — new `revoke_centre_authorization()`; `authorize_centre()` fixed to re-activate a revoked row instead of inserting a duplicate.
+- `backend/app/api/v1/papers.py` — new `POST /papers/{paper_id}/revoke` (Admin-only).
+- `frontend/src/api/endpoints.ts` — new `revokeCentre()` client function.
+- `frontend/src/pages/admin/papers/PaperDetailPage.tsx` — small "Revoke" form reusing the existing centre-ID field.
+- `PROJECT_STATE.md` — this section.
+
+## 23.5 Files deleted
+None.
+
+## 23.6 Database / API / frontend / blockchain / security changes
+- **Database:** none. No migration; `is_revoked` and the unique constraint already existed. `audit_events.event_type` is free-text, so the new `CENTRE_AUTHORIZATION_REVOKED` type needed no schema change. (No `revoked_at` column was added; the audit event timestamp records when.)
+- **API:** `POST /api/v1/papers/{paper_id}/revoke`, body `{centre_id}`, reuses `PaperAuthorizeRequest`/`PaperAuthorizeResponse`. 200 on success; 400 if the centre is unknown or has no currently-active authorization (revoking nothing is an error, deliberately unlike authorize's idempotent re-grant); 404 unknown paper; 401/403 unauthenticated / non-Admin.
+- **Frontend:** minimal revoke form; server remains the only authority. No new shared components, types or CSS.
+- **Blockchain:** no change. `revoke_centre_authorization` makes no blockchain call, mirroring `authorize_centre` — CC-02 and CC-03 are both UNSUPPORTED by the deployed chaincode. The revocation's *audit event* uses the existing `record_audit_event`, which best-effort forwards to the configured backend (tested with the stub only). The authorization state itself is not on-chain (unchanged limitation).
+- **Security:** retrieval/list/metadata denial after revocation needed no new code (existing `is_revoked` filter); the denial message is the same generic one as for a never-authorized centre, so no new oracle. Time-lock, AES-GCM, SHA-256, rate limiting, OTP limits, headers: untouched.
+
+## 23.7 Tests added
+18 total: 14 backend (revoke success; never-authorized and double-revoke rejected; **re-authorize-after-revoke regression**; unknown centre/paper; Centre, Auditor, cross-centre and unauthenticated denied; revoked centre denied retrieval — after a confirmed successful retrieval beforehand —, list and metadata; audit event created) and 4 frontend (section renders; empty-ID validation makes no request; success asserts the real POST body/path; backend error displayed).
+
+## 23.8 Exact test results (all actually executed)
+- Backend SQLite: **271/271** (257 prior + 14 new), run in three batches (115 + 112 + 44) because of a per-command tool time limit.
+- Backend PostgreSQL 16: **271/271**, same three batches, schema recreated first.
+- New backend file in reversed order: 14/14.
+- Frontend: **57/57** (53 prior + 4 new); `tsc -b` clean; `vite build` succeeds.
+- `py_compile` over app/scripts/tests clean; diff scan for `print(`/`console.log`/key material found nothing.
+
+## 23.9 Mutation testing (each reverted, verified byte-identical)
+1. Restore the pre-6F `authorize_centre` lookup → re-authorization regression test fails.
+2. Widen the revoke route's `require_role` to all roles → Centre/Auditor/cross-centre RBAC tests fail (3).
+3. Make revoke silently no-op when nothing is authorized → both rejection tests fail (2).
+4. Frontend: skip the revoke API call → first attempt exposed a weak test (success message still passed); the test was strengthened to assert the actual request, and the rerun fails 2 tests.
+
+## 23.10 Known limitations
+- No endpoint lists a paper's current authorizations, so the admin UI cannot show who is authorized; the Admin must supply the centre UUID.
+- Revocation state is PostgreSQL-only; not on the blockchain (chaincode has no AuthorizeCentre/RevokeCentre).
+- The existing authorize form on `PaperDetailPage` still has no frontend test (pre-existing gap, not backfilled).
+- Pre-existing, unchanged, not fixed: `DevConsoleOTPProvider` logs the plaintext OTP unconditionally; 403-vs-404 paper-existence disclosure; broad CORS. This phase does not claim zero security issues.
+- Not done: no live Fabric check; no GitHub push (no remote is configured here).
+- Housekeeping: running `npm install`/`tsc` modified `frontend/package-lock.json` (stale version field) and the tracked `tsconfig.app.tsbuildinfo`; both were deliberately reverted as unrelated to this phase.
+
+## 23.11 Architectural decisions
+Reuse existing request/response schemas; soft-revoke (flag, never delete) to preserve history; no `revoked_at` column; no dead blockchain call; revoke-of-nothing is a 400.
+
+## 23.12 Git / next step
+Local commit `Phase 6F checkpoint: examination-centre authorization revocation` (not pushed).
+**Phase 6F — COMPLETE.** Next phase: not yet chosen; candidates found during inspection are an "list authorizations for a paper" read endpoint and an explicit release-schedule update endpoint (none exists today — `release_timestamp` is set only at registration).
