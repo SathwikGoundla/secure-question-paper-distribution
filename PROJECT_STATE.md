@@ -2504,3 +2504,58 @@ Reuse existing request/response schemas; soft-revoke (flag, never delete) to pre
 ## 23.12 Git / next step
 Local commit `Phase 6F checkpoint: examination-centre authorization revocation` (not pushed).
 **Phase 6F — COMPLETE.** Next phase: not yet chosen; candidates found during inspection are an "list authorizations for a paper" read endpoint and an explicit release-schedule update endpoint (none exists today — `release_timestamp` is set only at registration).
+
+# 24. Phase 6G — Release Scheduling & Lifecycle Control
+
+## 24.1 Objective
+Give Admins a controlled way to change a paper's release time and give every caller a truthful lock state, **without adding a second time-lock**. `paper_service.retrieve_paper` remains the only enforcement point.
+
+## 24.2 What inspection found (actual code)
+- No endpoint could change `release_timestamp` after registration.
+- `papers.status` is written once as `"registered"` and never updated, so `GET /papers/{id}/status` kept reporting `registered` after the release time passed. LLD API-08 specifies a `lock_status (locked/released)` field; it was never implemented.
+- `release_timestamp` was taken from a form field with no timezone requirement, although it drives the time-lock (a naive value is interpreted in the database session's timezone). The frontend already always sent an explicit UTC instant.
+- `release_timestamp` is not on the blockchain (the Fabric registration payload never carried it), so there is no ledger value to keep consistent. No blockchain code was changed.
+
+## 24.3 Implementation status
+IMPLEMENTED and VERIFIED on SQLite and real PostgreSQL 16 (backend) and Vitest/tsc/build (frontend). Not verified in a real browser; not verified against a live Fabric network.
+
+## 24.4 Files
+- **Created:** `backend/tests/test_paper_release_scheduling.py` (23 tests).
+- **Modified:** `backend/app/services/paper_service.py`, `backend/app/api/v1/papers.py`, `backend/app/schemas/papers.py`, `backend/tests/conftest.py` (test-only, see 24.7), `frontend/src/api/endpoints.ts`, `frontend/src/types/papers.ts`, `frontend/src/pages/admin/papers/PaperDetailPage.tsx`, `frontend/src/pages/admin/papers/PaperDetailPage.test.tsx` (+5 tests), `PROJECT_STATE.md`.
+- **Deleted:** none. **Database/schema changes:** none (no migration). **Dependencies:** none.
+
+## 24.5 API changes
+- **New** `PATCH /api/v1/papers/{paper_id}/schedule` — Admin only. Body `{release_timestamp}`. Rules, in order: 404 unknown paper; 400 if the timestamp has no timezone; 400 if not strictly in the future (so a past value can never instantly unlock a paper — releasing early means scheduling a near-future time); 409 if the paper's release time has **already passed** (centres may already have retrieved it); same instant again is a 200 no-op without an audit event. 401 unauthenticated, 403 Centre/Auditor.
+- **Changed** `GET /papers/{id}/status` now also returns `lock_status` (`"locked"`/`"released"`), computed from the stored release time by the backend clock at request time — not stored, so it cannot drift. Informational only.
+- **Changed (behaviour)** `POST /papers/register` now rejects a `release_timestamp` without a timezone with 400, and stores the instant normalised to UTC. Existing tests and the frontend already sent explicit-UTC values.
+
+## 24.6 Design decisions
+- One definition of "released": `paper_service.is_released(release_timestamp, now)` (`now >= release`; at the exact instant it counts as released). `retrieve_paper` now calls it instead of an inline comparison (same behaviour), and `lock_status` calls the same function. Breaking it fails the existing `test_time_lock.py` tests (4 failures when mutated).
+- `lock_status` is computed, not stored: no background job, no second source of truth.
+- Reschedule reads the paper row `FOR UPDATE`. Demonstrated manually on PostgreSQL 16: a second reschedule blocked while another transaction held the row and completed when it was released (throwaway script, not an automated test). SQLite ignores the clause.
+- Audit events (existing `record_audit_event`, which best-effort forwards to the configured blockchain backend — only the stub was exercised): `PAPER_RELEASE_RESCHEDULED` (SUCCESS) and `PAPER_RELEASE_RESCHEDULE_REJECTED` (REJECTED, for the already-released case only; validation errors are not audited, matching the rest of the codebase).
+- Frontend: the admin Paper Detail page shows the server-reported "Release state", and a reschedule form only while the server says the paper is locked. The datetime-local value is converted to an explicit UTC ISO string; there is deliberately no client-side "must be in the future" check (the server decides and its message is displayed).
+
+## 24.7 Test-infrastructure change
+`tests/conftest.py` gained a mapper `refresh` listener alongside the existing load-time hook that re-attaches UTC to SQLite's naive datetimes. Reason: after `db.refresh(obj)` SQLite returns naive values again, which made a refreshed `release_timestamp` raise `TypeError` when compared with an aware "now" — on SQLite only. This follows the project's existing policy: no normalisation was added to application code.
+
+## 24.8 Tests and results (all executed)
+- New backend tests: 23/23 (functional, invalid input/state, repeated reschedule, RBAC incl. cross-centre UUID substitution, status states, an end-to-end test that reschedules to ~4 s ahead and shows retrieval denied then allowed on the real clock, registration timezone hardening, audit).
+- Backend full suite: **SQLite 294/294**, **PostgreSQL 294/294** (271 prior + 23), each run in three batches because of a per-command tool time limit. The sandbox's PostgreSQL service stopped between two tool calls once; it was restarted and the affected batch rerun (not a code failure).
+- New file in reversed order: 23/23. `py_compile` clean. Diff scan found no `print(`/`console.log`/key material.
+- Frontend: **62/62** (57 + 5 new); `tsc -b` clean; `vite build` succeeds.
+
+## 24.9 Mutation testing (each reverted and verified identical)
+Skip the already-released guard → fails `test_released_paper_cannot_be_rescheduled`. Remove the future check → fails the past-timestamp test. Accept naive timestamps → fails the naive-timestamp test. Widen the route's roles → fails `test_centre_cannot_reschedule`. Force `lock_status` to "locked" → fails the status test. Make `is_released` always true → fails the first scheduling test and 4 existing `test_time_lock.py` tests. Frontend: send the raw timezone-less value → fails the UTC test; show the form for released papers → fails the released-paper test.
+
+## 24.10 Known limitations
+- The stored `papers.status` column is still never updated and is still returned as `status` (still shown as a "Status" badge beside the new "Release state"). It was not removed or repurposed to avoid changing existing responses; a future cleanup should retire or drive it.
+- The audit event does not record the old and new release times (`audit_events` has no column for details). A dedicated schedule-history table would be a schema change and was not added.
+- Rescheduling is only possible while locked; there is no "release now" action. Moving a release time earlier is allowed (any future instant) — Admin-only and audited, but not further restricted.
+- No endpoint lists a paper's current authorizations (carried over from Phase 6F).
+- Pre-existing, unchanged, not fixed: `DevConsoleOTPProvider` logs the plaintext OTP unconditionally; 403-vs-404 paper-existence disclosure; broad CORS. No zero-issues claim is made.
+- No GitHub remote is configured here; the commit is local only.
+
+## 24.11 Git / next step
+Local commit `Phase 6G checkpoint: release scheduling and lock status`.
+**Phase 6G — COMPLETE.** Next phase not yet chosen; candidates: retire/derive the stale `status` column, a schedule-history record for audit, a read endpoint for a paper's authorizations.

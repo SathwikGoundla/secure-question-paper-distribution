@@ -92,6 +92,32 @@ logger = logging.getLogger(__name__)
 _PDF_MAGIC = b"%PDF-"
 
 
+def require_timezone_aware(ts: datetime) -> datetime:
+    """
+    Phase 6G. A release time with no timezone is ambiguous (the database
+    would interpret it in whatever its session timezone happens to be),
+    and this value drives the project's security-critical time-lock.
+    The frontend already always sends an explicit UTC instant; this makes
+    the backend enforce that instead of trusting it. Returns the instant
+    normalised to UTC.
+    """
+    if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
+        raise ValidationFailedException(
+            "release_timestamp must include a timezone, e.g. 2026-01-01T09:00:00Z."
+        )
+    return ts.astimezone(timezone.utc)
+
+
+def is_released(release_timestamp: datetime, now: datetime | None = None) -> bool:
+    """
+    The single definition of "has this paper's release time arrived",
+    shared by retrieve_paper's enforcement and by the informational
+    lock_status field, so the two can never disagree. At exactly the
+    release instant the paper counts as released (>=).
+    """
+    return (now or datetime.now(timezone.utc)) >= release_timestamp
+
+
 def _validate_pdf_upload(filename: str | None, content_type: str | None, file_bytes: bytes) -> None:
     """
     FR-006 acceptance criteria ("Paper is recorded with validated
@@ -136,6 +162,7 @@ def register_paper(
 
     try:
         _validate_pdf_upload(filename, content_type, file_bytes)
+        release_timestamp = require_timezone_aware(release_timestamp)  # Phase 6G
     except ValidationFailedException:
         record_audit_event(
             db, "PAPER_PROCESSING_FAILURE", actor_id=admin_user.user_id, outcome="REJECTED"
@@ -499,6 +526,74 @@ def revoke_centre_authorization(
     return existing
 
 
+def reschedule_paper_release(
+    db: Session, admin_user: CurrentUser, paper_id: uuid.UUID, new_release_timestamp: datetime
+) -> Paper:
+    """
+    Phase 6G. Admin-only change of a paper's release time.
+
+    This edits the stored release_timestamp ONLY. It is not a second
+    time-lock: retrieve_paper's check (via is_released) is still the
+    only thing that gates access, and it reads whatever value is stored
+    at the moment of each request.
+
+    Rules (validation errors first, then state):
+      * the new time must carry a timezone (400);
+      * the new time must be in the future (400) — releasing a paper
+        immediately is done by scheduling a near-future time, never by
+        back-dating, so an accidental or malicious past value cannot
+        instantly unlock a paper;
+      * a paper whose release time has ALREADY passed cannot be
+        rescheduled (409): centres may already have retrieved it, so
+        "re-locking" it would be meaningless and misleading.
+    Setting the same instant again is accepted as a no-op (no audit).
+
+    The paper row is read FOR UPDATE so two concurrent reschedules are
+    serialised on PostgreSQL (SQLite ignores the clause; last write
+    wins there, which only matters for the test backend).
+
+    release_timestamp is not on the blockchain (the Fabric payload never
+    carried it), so there is no ledger value to keep consistent. The
+    audit event does not record the old/new values — audit_events has no
+    column for them (known limitation, see PROJECT_STATE.md).
+    """
+    get_paper_by_id_or_404(db, paper_id)
+
+    new_ts = require_timezone_aware(new_release_timestamp)
+    now = datetime.now(timezone.utc)
+    if new_ts <= now:
+        raise ValidationFailedException("The new release time must be in the future.")
+
+    paper = db.query(Paper).filter(Paper.paper_id == paper_id).with_for_update().one()
+
+    if is_released(paper.release_timestamp, now):
+        record_audit_event(
+            db,
+            "PAPER_RELEASE_RESCHEDULE_REJECTED",
+            actor_id=admin_user.user_id,
+            outcome="REJECTED",
+            paper_id=paper_id,
+        )
+        raise ConflictException("This paper has already been released and can no longer be rescheduled.")
+
+    if new_ts == paper.release_timestamp:
+        db.rollback()  # release the row lock; nothing changed
+        return paper
+
+    paper.release_timestamp = new_ts
+    db.commit()
+    db.refresh(paper)
+
+    record_audit_event(
+        db,
+        "PAPER_RELEASE_RESCHEDULED",
+        actor_id=admin_user.user_id,
+        outcome="SUCCESS",
+        paper_id=paper_id,
+    )
+    return paper
+
+
 def retrieve_paper(db: Session, current_user: CurrentUser, paper_id: uuid.UUID) -> bytes:
     """
     LLD API-07 (GET /papers/{paper_id}/retrieve). Implements, in order
@@ -564,8 +659,7 @@ def retrieve_paper(db: Session, current_user: CurrentUser, paper_id: uuid.UUID) 
     # the same reasoning already applied to auth_service.py in Phase 3:
     # don't paper over a test-harness artifact in code that is correct
     # for the actual production database.)
-    current_time = datetime.now(timezone.utc)
-    if current_time < paper.release_timestamp:
+    if not is_released(paper.release_timestamp):
         record_security_event(
             db, "PRE_RELEASE_ATTEMPT", actor_id=current_user.user_id, paper_id=paper_id, severity="MEDIUM"
         )

@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
-import { authorizeCentre, getPaperMetadata, getPaperStatus, revokeCentre } from "../../../api/endpoints";
+import {
+  authorizeCentre,
+  getPaperMetadata,
+  getPaperStatus,
+  reschedulePaperRelease,
+  revokeCentre,
+} from "../../../api/endpoints";
 import { ApiError } from "../../../types/api";
 import type { PaperMetadataResponse, PaperStatusResponse } from "../../../types/papers";
 import { useKnownPapers } from "../../../hooks/useKnownPapers";
@@ -39,6 +45,14 @@ export function PaperDetailPage() {
   const [revokeMessage, setRevokeMessage] = useState<string | null>(null);
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const [isRevoking, setIsRevoking] = useState(false);
+
+  // Phase 6G: release rescheduling. The datetime-local value is the
+  // admin's LOCAL wall-clock time; it is converted to an explicit UTC
+  // instant before sending, because the backend requires a timezone.
+  const [newRelease, setNewRelease] = useState("");
+  const [rescheduleMessage, setRescheduleMessage] = useState<string | null>(null);
+  const [rescheduleError, setRescheduleError] = useState<string | null>(null);
+  const [isRescheduling, setIsRescheduling] = useState(false);
 
   const load = useCallback(() => {
     if (!paperId) return;
@@ -93,6 +107,45 @@ export function PaperDetailPage() {
     }
   }
 
+  async function handleReschedule(event: FormEvent) {
+    event.preventDefault();
+    setRescheduleError(null);
+    setRescheduleMessage(null);
+
+    if (!paperId) return;
+    if (!newRelease) {
+      setRescheduleError("Choose the new release date and time.");
+      return;
+    }
+    const chosen = new Date(newRelease);
+    if (Number.isNaN(chosen.getTime())) {
+      setRescheduleError("That date and time is not valid.");
+      return;
+    }
+
+    setIsRescheduling(true);
+    try {
+      // No client-side "must be in the future" check on purpose: the
+      // server decides (and its message is shown), the browser clock
+      // is not a security control.
+      const result = await reschedulePaperRelease(paperId, chosen.toISOString());
+      setMetadata((prev) => (prev ? { ...prev, release_timestamp: result.release_timestamp } : prev));
+      setStatusInfo((prev) =>
+        prev
+          ? { ...prev, release_timestamp: result.release_timestamp, lock_status: result.lock_status }
+          : prev,
+      );
+      setRescheduleMessage(
+        `Release time updated to ${new Date(result.release_timestamp).toLocaleString()}.`,
+      );
+      setNewRelease("");
+    } catch (err) {
+      setRescheduleError(err instanceof ApiError ? err.userMessage : "Unable to reschedule this paper.");
+    } finally {
+      setIsRescheduling(false);
+    }
+  }
+
   async function handleRevoke(event: FormEvent) {
     event.preventDefault();
     setRevokeError(null);
@@ -144,11 +197,50 @@ export function PaperDetailPage() {
         </dd>
         <dt>SHA-256 hash</dt>
         <dd className="mono">{metadata.sha256_hash}</dd>
+        <dt>Release state</dt>
+        <dd>
+          <span className="status-badge">
+            {statusInfo?.lock_status === "released" ? "Released" : "Locked"}
+          </span>
+        </dd>
         <dt>Scheduled release time</dt>
         <dd>{new Date(metadata.release_timestamp).toLocaleString()}</dd>
         <dt>Registered at</dt>
         <dd>{new Date(metadata.created_at).toLocaleString()}</dd>
       </dl>
+
+      <h2 className="admin-section-heading">Release schedule</h2>
+      {statusInfo?.lock_status === "released" ? (
+        <p className="admin-page-note">
+          This paper has already been released, so its release time can no longer be changed.
+        </p>
+      ) : (
+        <>
+          <p className="admin-page-note">
+            Changes when this paper unlocks. The server enforces the lock; this form only updates the
+            scheduled time, and the server rejects times that are not in the future.
+          </p>
+          <form className="lookup-form" onSubmit={handleReschedule}>
+            <Input
+              id="new-release"
+              label="New release time (your local time)"
+              type="datetime-local"
+              value={newRelease}
+              onChange={(e) => setNewRelease(e.target.value)}
+              disabled={isRescheduling}
+            />
+            {rescheduleMessage && (
+              <p className="success-banner" role="status">
+                {rescheduleMessage}
+              </p>
+            )}
+            <ErrorBanner message={rescheduleError} />
+            <Button type="submit" isLoading={isRescheduling}>
+              Reschedule Release
+            </Button>
+          </form>
+        </>
+      )}
 
       <h2 className="admin-section-heading">Authorize an examination centre</h2>
       <p className="admin-page-note">

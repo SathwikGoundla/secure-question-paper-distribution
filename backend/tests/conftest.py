@@ -98,6 +98,25 @@ def _make_tz_aware_columns_tz_aware_on_load(session, instance) -> None:
 _sa_event.listen(_SA_Session, "loaded_as_persistent", _make_tz_aware_columns_tz_aware_on_load)
 
 
+def _make_tz_aware_on_refresh(instance, context, attrs):
+    """
+    Phase 6G addition to the same test-only SQLite compensation: the
+    "loaded_as_persistent" hook above fires only when an object is
+    first loaded. A later db.refresh(obj) (or reload of expired
+    attributes) re-reads the row and SQLite hands the naive value back
+    again, so application code comparing a refreshed release_timestamp
+    against an aware "now" raised TypeError — on SQLite only; real
+    PostgreSQL always returns aware values. Still test-level only: no
+    normalisation was added to application code.
+    """
+    _make_tz_aware_columns_tz_aware_on_load(None, instance)  # session arg is unused
+
+
+from sqlalchemy.orm import Mapper as _SA_Mapper  # noqa: E402
+
+_sa_event.listen(_SA_Mapper, "refresh", _make_tz_aware_on_refresh)
+
+
 @pytest.fixture(scope="session")
 def db_engine():
     url = os.environ["DATABASE_URL"]

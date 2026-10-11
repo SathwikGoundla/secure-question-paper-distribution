@@ -33,6 +33,8 @@ from app.schemas.papers import (
     PaperListResponse,
     PaperMetadataResponse,
     PaperRegisterResponse,
+    PaperRescheduleRequest,
+    PaperScheduleResponse,
     PaperStatusResponse,
 )
 from app.services import paper_service
@@ -215,4 +217,29 @@ def paper_status(
         paper_id=paper.paper_id,
         status=paper.status,
         release_timestamp=paper.release_timestamp,
+        lock_status="released" if paper_service.is_released(paper.release_timestamp) else "locked",
+    )
+
+
+@router.patch(
+    "/{paper_id}/schedule",
+    response_model=PaperScheduleResponse,
+)
+def reschedule_paper_release(
+    paper_id: UUID,
+    body: PaperRescheduleRequest,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(require_role("Admin")),
+) -> PaperScheduleResponse:
+    """
+    Phase 6G. Admin-only. Changes the release time of a paper that is
+    STILL LOCKED. This only edits the stored release_timestamp; the
+    existing server-side time-lock in paper_service.retrieve_paper
+    remains the sole enforcement point (no second mechanism).
+    """
+    paper = paper_service.reschedule_paper_release(db, current_user, paper_id, body.release_timestamp)
+    return PaperScheduleResponse(
+        paper_id=paper.paper_id,
+        release_timestamp=paper.release_timestamp,
+        lock_status="released" if paper_service.is_released(paper.release_timestamp) else "locked",
     )

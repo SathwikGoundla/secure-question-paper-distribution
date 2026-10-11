@@ -13,6 +13,7 @@ already established by schemas/auth.py.
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -47,6 +48,26 @@ class PaperStatusResponse(BaseModel):
     paper_id: uuid.UUID
     status: str
     release_timestamp: datetime
+    # Phase 6G: computed by the backend clock at request time from
+    # release_timestamp (see paper_service.is_released) — NOT stored,
+    # so it can never drift from the time-lock that actually governs
+    # retrieval. Informational only; retrieve_paper re-checks on its own.
+    lock_status: Literal["locked", "released"]
+
+
+class PaperRescheduleRequest(BaseModel):
+    """Phase 6G: PATCH /papers/{paper_id}/schedule request body. The
+    timestamp MUST carry a timezone (validated in paper_service)."""
+
+    release_timestamp: datetime
+
+
+class PaperScheduleResponse(BaseModel):
+    """Phase 6G: PATCH /papers/{paper_id}/schedule response."""
+
+    paper_id: uuid.UUID
+    release_timestamp: datetime
+    lock_status: Literal["locked", "released"]
 
 
 class PaperListItemResponse(BaseModel):

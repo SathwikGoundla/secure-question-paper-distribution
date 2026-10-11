@@ -22,6 +22,7 @@ import type {
   NotImplementedResponse,
   PaperAuthorizeRequest,
   PaperAuthorizeResponse,
+  PaperScheduleResponse,
   PaperListResponse,
   PaperMetadataResponse,
   PaperRegisterResponse,
@@ -151,6 +152,22 @@ export function authorizeCentre(
   return apiRequest<PaperAuthorizeResponse>(`/papers/${paperId}/authorize`, {
     method: "POST",
     body,
+  });
+}
+
+/**
+ * PATCH /api/v1/papers/{paper_id}/schedule — Admin-only. Phase 6G.
+ * Changes the release time of a paper that is still locked. The value
+ * must be a timezone-qualified instant (the page sends an ISO-8601 UTC
+ * string); the backend rejects naive, past, or already-released cases.
+ */
+export function reschedulePaperRelease(
+  paperId: string,
+  releaseTimestamp: string,
+): Promise<PaperScheduleResponse> {
+  return apiRequest<PaperScheduleResponse>(`/papers/${paperId}/schedule`, {
+    method: "PATCH",
+    body: { release_timestamp: releaseTimestamp },
   });
 }
 

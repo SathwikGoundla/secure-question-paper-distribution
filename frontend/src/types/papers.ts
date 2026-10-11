@@ -42,6 +42,18 @@ export interface PaperStatusResponse {
   paper_id: string;
   status: string;
   release_timestamp: string;
+  /**
+   * Phase 6G: computed by the backend clock when the request is made.
+   * Informational only — retrieval is still enforced server-side.
+   */
+  lock_status: "locked" | "released";
+}
+
+/** PATCH /papers/{paper_id}/schedule response body (PaperScheduleResponse). */
+export interface PaperScheduleResponse {
+  paper_id: string;
+  release_timestamp: string;
+  lock_status: "locked" | "released";
 }
 
 /**
