@@ -109,7 +109,8 @@ export function PapersPage() {
             <tr>
               <th>Paper ID</th>
               <th>Subject</th>
-              <th>Status</th>
+              <th>Registration status</th>
+              <th>Release state</th>
               <th>Registered</th>
             </tr>
           </thead>
@@ -122,6 +123,9 @@ export function PapersPage() {
                 <td>{paper.subject}</td>
                 <td>
                   <span className="status-badge">{paper.status}</span>
+                </td>
+                <td>
+                  <span className="status-badge">{paper.lock_status === "released" ? "Released" : "Locked"}</span>
                 </td>
                 <td>{new Date(paper.created_at).toLocaleString()}</td>
               </tr>

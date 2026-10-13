@@ -2559,3 +2559,76 @@ Skip the already-released guard → fails `test_released_paper_cannot_be_resched
 ## 24.11 Git / next step
 Local commit `Phase 6G checkpoint: release scheduling and lock status`.
 **Phase 6G — COMPLETE.** Next phase not yet chosen; candidates: retire/derive the stale `status` column, a schedule-history record for audit, a read endpoint for a paper's authorizations.
+
+
+---
+
+# 25. Phase 6H — Paper lifecycle consistency and release-schedule history
+
+## 25.1 Scope and starting point
+Inspected first (not assumed): repo was clean at `bda8b16` (HEAD, `master`); the Phase 6G ZIP was the supplied upload. Everything below was verified against the real code. Baseline re-run on a pristine extract of the 6G ZIP: **294 backend tests passed** (115 + 95 + 84, SQLite; `test_phase2_manual.py` is a live-server script, not part of the automated suite, and is excluded as in 6G).
+
+## 25.2 Root cause of the status inconsistency
+- `papers.status` is written once, as `"registered"`, and never again (no other writer exists; `blockchain_service`'s `status = "released"` belongs to the in-memory stub ledger record, not the `papers` table).
+- Phase 6G added a computed `lock_status`, but only on `GET /papers/{id}/status` and `PATCH .../schedule`. The register response, `GET /papers/{id}` and `GET /papers` carried only `status`, and the UI labelled it "Status" beside "Release state".
+- The Exam Centre dashboard split papers into locked/released using the **browser clock**.
+- Found while inspecting: `reschedule_paper_release` loaded the paper with `db.get(...)` and then ran `SELECT ... FOR UPDATE`. Without `populate_existing()` SQLAlchemy does not overwrite an already-loaded instance, so a reschedule that waited on another admin's lock would have seen a stale "previous" value. Harmless in 6G (nothing recorded it); it would have corrupted the new history. Fixed and tested (`test_stale_session_...`, and a real two-transaction race on PostgreSQL).
+
+## 25.3 Lifecycle semantics (three distinct concepts)
+| Concept | Where it lives | Meaning | Changes when |
+|---|---|---|---|
+| Registration status | `papers.status` → API field `status` | The paper is registered in the system. Only value in use: `registered`. | Never today. Not a release or access indicator. |
+| Release/lock state | **computed**, API field `lock_status` | `released` iff the **server clock** has reached `release_timestamp` (`now >= release`; the exact instant counts as released); else `locked`. | Automatically as time passes, or when an admin reschedules a locked paper. Never persisted. |
+| Access history | `audit_events` (`PAPER_RELEASED`, outcome SUCCESS) | A centre actually received a decrypted paper. Written only after authorization, time-lock, integrity and decryption all succeeded. | Per successful retrieval. Visible via the audit log API; **not** part of `status` or `lock_status`. |
+
+Decisions: `status` stays a registration field (no schema change, no new enum, no migration to persist a time-derived value). `lock_status` is now returned by **every** endpoint that returns a paper, all through one helper `paper_service.lock_status_for()`, which wraps the Phase 6G `is_released()`. There is still exactly one time-lock decision; no second gate. "Released" never means "opened". Schedule: `release_timestamp` is NOT NULL and timezone-aware, so a missing schedule cannot exist (register without it → 422; naive → 400; tested; NOT NULL tested). The Phase 6G restriction is unchanged: rescheduling only while locked, future time only.
+
+## 25.4 Schedule history — design
+- Chosen: dedicated table `paper_schedule_history`. `audit_events` has no details/metadata column; adding a JSON column to a table that already holds data and is forwarded to the blockchain backend was the larger change. The existing `PAPER_RELEASE_RESCHEDULED` audit event is still written (audit log/ledger feed); the new table holds only the old/new values. They are complementary, not duplicate mechanisms.
+- Columns: `history_id` (uuid PK), `paper_id` (FK papers), `actor_id` (FK users), `action` (`RESCHEDULED`), `previous_release_timestamp`, `new_release_timestamp`, `created_at` (all timestamptz; UTC; `created_at` assigned in UTC with microseconds by the backend, with `server_default now()` as a safety net, so ordering is deterministic even on SQLite's 1-second `CURRENT_TIMESTAMP`). Index `(paper_id, created_at)`. FKs use the default NO ACTION: history can't be silently deleted with its paper/user; nothing deletes papers today.
+- Transaction behaviour: the `release_timestamp` update and the history row go through one session and one `commit()`; any failure → `rollback()` of both. The success audit event is written only after that commit. Rejected attempts (invalid/naive/past/released/unknown/non-admin) and same-instant no-ops write **no** history row (the already-released rejection still writes its existing `..._REJECTED` audit event; a rejection is never recorded as a success).
+- Concurrency: `FOR UPDATE` + `populate_existing()` → "previous" is always the last committed value. PostgreSQL serialises concurrent reschedules; SQLite ignores row locks (test backend only).
+- Contains no passwords, OTPs, JWTs, keys or paper content; nothing here touches the blockchain.
+
+## 25.5 API changes (all additive)
+- New: `GET /api/v1/papers/{paper_id}/schedule-history` — Admin only (401 unauthenticated, 403 centre/auditor incl. an authorized centre, 404 unknown paper, 422 bad UUID/paging); oldest first (`created_at`, then `history_id`); `page` (≥1) / `page_size` (1–100, default 50); same `{items,total,page,page_size}` envelope as `GET /papers`; fields: `history_id, paper_id, action, previous_release_timestamp, new_release_timestamp, actor_id, actor_username, created_at`. Documented in OpenAPI. Existing `GET /audit/logs` cannot provide this (no old/new values), so a new endpoint was necessary. Auditor access was not added (Admin-only, minimal).
+- Added field `lock_status` to: register response, `GET /papers/{id}`, `GET /papers` items. Existing fields unchanged and still present. Field descriptions in OpenAPI now state the semantics.
+- Compatibility: additive only. Three response-schema allow-list tests (`test_paper_api`, `test_paper_blockchain_integration`, `test_paper_list_api`) assert "no field outside this safe list"; `lock_status` was added to each list deliberately (non-secret).
+
+## 25.6 Frontend changes
+- Types/API client: `lock_status` on paper types; `getPaperScheduleHistory`.
+- Admin Paper Detail: "Registration status" and "Release state" shown separately with a note that released ≠ opened; new "Release schedule history" table (loading / empty / error / success; error or malformed payload never hides the paper); history re-fetched from the server after a successful reschedule (no optimistic rows). Admin Papers list: separate "Registration status" and "Release state" columns.
+- Exam Centre dashboard: locked/released counts and per-paper state now come from the server's `lock_status` (the `useNow` browser-clock comparison was removed from that page); Exam Centre paper detail: "Registration status" + server "Release state"; the informational device-clock countdown is shown only while the server says locked.
+- Admin dashboard "papers by status" is unchanged: it correctly counts registration status.
+- No new dependencies.
+
+## 25.7 Files
+- Created: `backend/app/models/paper_schedule_history.py`, `backend/tests/test_paper_schedule_history.py` (35 tests), `frontend/src/pages/admin/papers/PapersPage.test.tsx` (1 test).
+- Modified: `backend/app/models/__init__.py`, `backend/app/services/paper_service.py`, `backend/app/schemas/papers.py`, `backend/app/api/v1/papers.py`, `backend/tests/test_paper_list_api.py`, `backend/tests/test_paper_api.py`, `backend/tests/test_paper_blockchain_integration.py` (allow-lists +`lock_status`), `frontend/src/types/papers.ts`, `frontend/src/api/endpoints.ts`, `frontend/src/pages/admin/papers/{PaperDetailPage.tsx,PaperDetailPage.test.tsx,PapersPage.tsx}`, `frontend/src/pages/exam-centre/{ExamCentreDashboardPage.tsx,ExamCentrePaperDetailPage.tsx,ExamCentrePortal.integration.test.tsx}`, `PROJECT_STATE.md`.
+- Schema: **one new table** (`paper_schedule_history`); no column changed. There is no migration framework in this repo (tables come from `Base.metadata.create_all`), so no new `add_*_columns.py` script is needed: running `python scripts/init_db.py` (idempotent) creates the table. Upgrade verified on PostgreSQL 16: a database built by the Phase 6G code (10 tables, 3 roles) was upgraded by the 6H `init_db.py` to 11 tables, existing rows untouched, re-run idempotent. Fresh-database creation is exercised by every test run (`create_all`). No database was deleted or recreated.
+
+## 25.8 Tests (all executed in this session)
+- Backend baseline (pristine 6G): 294 passed.
+- New backend tests: 35 (lifecycle consistency across every endpoint; boundary; single-source proof by forcing `is_released`; centre view; "released ≠ accessed"; missing/naive schedule; first reschedule old/new/actor/paper; UTC normalisation from a +05:30 input; ordered unbroken multi-change chain; same-instant no-op; invalid/past/naive/released rejections write no history; non-admin/unauthenticated/unknown paper; rollback when the history step fails; rollback when the history INSERT fails at commit; stale-session regression; real PostgreSQL row-lock race (skipped on SQLite); history access control incl. authorized-centre IDOR; pagination; scoping; no-secret check and exact table columns; OpenAPI; 500 without leakage).
+- **Backend SQLite (final, after all fixes): 328 passed, 1 skipped** (the PostgreSQL-only row-lock test) = 329 collected, 452 s.
+- **Backend PostgreSQL 16.15 (final, fresh empty database): 329 passed, 0 skipped, 0 failed**, 458 s (includes the real two-transaction row-lock test).
+- Sequence honesty: the first full post-change runs on both databases showed 2 failures each, both secrecy allow-list tests (register response lacked `lock_status`); updated deliberately and the full suite then re-run on both databases (results above). One intermediate PostgreSQL run was invalid: the sandbox's PostgreSQL service stopped mid-run, and the next attempt reused that database, whose leftover rows caused 9 spurious 409 failures in the centre tests. Re-running on a brand-new database gave the clean 329/329 above. The sandbox PostgreSQL service is unstable between commands; results here are only those from completed runs.
+- Frontend: **71/71** (62 + 9 new); `tsc -b` clean; `vite build` succeeds.
+- Not run: `test_phase2_manual.py` (live-server script; not exercised this phase); live Hyperledger Fabric (stub backend only; strict/best-effort modes are covered by the existing suite on the stub, as in earlier phases).
+
+## 25.9 Mutation testing (temporary, in a separate copy of the backend; reverted and diff-verified clean)
+All 8 detected: M1 wrong old timestamp; M2 wrong new timestamp; M3 history write removed; M4 schedule committed before the history step (non-atomic) → rollback tests fail; M5 non-admin allowed on the history endpoint; M6a `lock_status` always "locked"; M6b metadata endpoint hard-codes "locked"; M7 `populate_existing()` removed → stale-previous test fails. No mutation was applied to the real working tree.
+
+## 25.10 Security review and known limitations
+- Authorization, IDOR, JWT, OTP attempt limits, rate limits, headers, AES-GCM, SHA-256, revocation, Fabric verification modes and the single server-side time-lock: unchanged and covered by the green regression suites.
+- Still open, unchanged and NOT fixed in this phase (no zero-issues claim): (1) `DevConsoleOTPProvider` logs the plaintext OTP at WARNING level unconditionally; (2) CORS allows all methods/headers with credentials (origins are configurable, default `http://localhost:3000`, not `*`); (3) an authorized-vs-unknown paper still yields 403 vs 404 for centres (the new endpoint is admin-only, so it adds no new disclosure).
+- `lock_status` on list responses is as of response time; the Exam Centre dashboard does not auto-refresh, so counts reflect page-load time (labelled so).
+- `PAPER_RELEASED` is the audit event name for "decrypted paper delivered"; the name is slightly misleading but was left unchanged to avoid breaking existing audit consumers. No UI shows per-paper "who opened it" (would be a future feature built on that event).
+- Schedule history records only changes made from 6H onward; reschedules done under 6G have no history (the data was never captured).
+- No GitHub push performed or configured.
+
+## 25.11 Git / packaging
+Local commit message: `Phase 6H checkpoint: consistent paper lifecycle and schedule history`. A file cannot contain its own commit hash or its archive's checksum, so the commit hash and the ZIP size/SHA-256 are reported in the phase report and in the sidecar `qpaper-system_PHASE_6H_COMPLETE.zip.sha256`, not in this document.
+
+## 25.12 Recommended next phase
+**Phase 6I — close the carried-over security findings:** gate/redact the dev OTP provider's plaintext logging, tighten CORS methods/headers, and decide the 403-vs-404 disclosure policy, each with tests and mutation checks. Rationale: these three are the only known, previously reported security items still open, and all are small and independent; fixing them before further features (e.g. an authorizations-listing endpoint, or a "retrieval history" view built on `PAPER_RELEASED`) keeps the feature work from building on known weaknesses.

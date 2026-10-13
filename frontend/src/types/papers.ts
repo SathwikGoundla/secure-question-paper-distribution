@@ -15,6 +15,14 @@
  * list endpoint.
  */
 
+/**
+ * Release state computed by the BACKEND clock (Phase 6H): "released" once
+ * the scheduled release time has been reached, otherwise "locked". It does
+ * not mean any centre has opened the paper. Never derive this from the
+ * browser clock.
+ */
+export type LockStatus = "locked" | "released";
+
 /** POST /papers/register response body (PaperRegisterResponse). */
 export interface PaperRegisterResponse {
   paper_id: string;
@@ -25,16 +33,21 @@ export interface PaperRegisterResponse {
   release_timestamp: string;
   created_at: string;
   ledger_tx_reference: string | null;
+  /** Phase 6H: server-computed release state (see LockStatus). */
+  lock_status: LockStatus;
 }
 
 /** GET /papers/{paper_id} response body (PaperMetadataResponse). */
 export interface PaperMetadataResponse {
   paper_id: string;
   subject: string;
+  /** Registration status (persisted by the backend). NOT a release or access indicator. */
   status: string;
   sha256_hash: string;
   release_timestamp: string;
   created_at: string;
+  /** Phase 6H: server-computed release state (see LockStatus). */
+  lock_status: LockStatus;
 }
 
 /** GET /papers/{paper_id}/status response body (PaperStatusResponse). */
@@ -46,14 +59,14 @@ export interface PaperStatusResponse {
    * Phase 6G: computed by the backend clock when the request is made.
    * Informational only — retrieval is still enforced server-side.
    */
-  lock_status: "locked" | "released";
+  lock_status: LockStatus;
 }
 
 /** PATCH /papers/{paper_id}/schedule response body (PaperScheduleResponse). */
 export interface PaperScheduleResponse {
   paper_id: string;
   release_timestamp: string;
-  lock_status: "locked" | "released";
+  lock_status: LockStatus;
 }
 
 /**
@@ -68,11 +81,33 @@ export interface PaperListItemResponse {
   release_timestamp: string;
   created_at: string;
   ledger_tx_reference: string | null;
+  /** Phase 6H: server-computed release state (see LockStatus). */
+  lock_status: LockStatus;
 }
 
 /** Phase 6C addition — GET /papers response envelope (paginated). */
 export interface PaperListResponse {
   items: PaperListItemResponse[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+/** Phase 6H — one successful release-time change (PaperScheduleHistoryItem). */
+export interface PaperScheduleHistoryItem {
+  history_id: string;
+  paper_id: string;
+  action: string;
+  previous_release_timestamp: string;
+  new_release_timestamp: string;
+  actor_id: string;
+  actor_username: string | null;
+  created_at: string;
+}
+
+/** Phase 6H — GET /papers/{paper_id}/schedule-history envelope (oldest first). */
+export interface PaperScheduleHistoryResponse {
+  items: PaperScheduleHistoryItem[];
   total: number;
   page: number;
   page_size: number;

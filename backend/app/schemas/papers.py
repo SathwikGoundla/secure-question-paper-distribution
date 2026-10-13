@@ -17,18 +17,36 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Phase 6H — the two fields below deliberately mean different things and
+# must not be conflated (full definitions in PROJECT_STATE.md Phase 6H):
+#   status       = REGISTRATION status, persisted. Today always "registered".
+#   lock_status  = RELEASE state, computed by the server clock from
+#                  release_timestamp on every response ("released" only
+#                  means the scheduled time has been reached).
+# Neither says whether any centre has opened the paper; that is access
+# history and lives in the audit log (PAPER_RELEASED events).
+_STATUS_DESC = (
+    "Registration status of the paper (persisted). Not a release or access indicator; "
+    "see lock_status for release state."
+)
+_LOCK_DESC = (
+    "Release state computed by the server clock: 'released' once release_timestamp has "
+    "been reached, otherwise 'locked'. Does not indicate that any centre has retrieved the paper."
+)
+
 
 class PaperRegisterResponse(BaseModel):
     """LLD API-04 response: "paper_id, registration status, ledger transaction reference." """
 
     paper_id: uuid.UUID
     subject: str
-    status: str
+    status: str = Field(description=_STATUS_DESC)
     sha256_hash: str
     encryption_algorithm: str
     release_timestamp: datetime
     created_at: datetime
     ledger_tx_reference: str | None = None
+    lock_status: Literal["locked", "released"] = Field(description=_LOCK_DESC)
 
 
 class PaperMetadataResponse(BaseModel):
@@ -36,17 +54,18 @@ class PaperMetadataResponse(BaseModel):
 
     paper_id: uuid.UUID
     subject: str
-    status: str
+    status: str = Field(description=_STATUS_DESC)
     sha256_hash: str
     release_timestamp: datetime
     created_at: datetime
+    lock_status: Literal["locked", "released"] = Field(description=_LOCK_DESC)
 
 
 class PaperStatusResponse(BaseModel):
     """LLD API-08 response: "lock_status (locked/released), last_integrity_check_result." """
 
     paper_id: uuid.UUID
-    status: str
+    status: str = Field(description=_STATUS_DESC)
     release_timestamp: datetime
     # Phase 6G: computed by the backend clock at request time from
     # release_timestamp (see paper_service.is_released) — NOT stored,
@@ -85,11 +104,14 @@ class PaperListItemResponse(BaseModel):
 
     paper_id: uuid.UUID
     subject: str
-    status: str
+    status: str = Field(description=_STATUS_DESC)
     sha256_hash: str
     release_timestamp: datetime
     created_at: datetime
     ledger_tx_reference: str | None = None
+    # Phase 6H: not an ORM attribute — the list route supplies it via
+    # paper_service.lock_status_for (single source of release state).
+    lock_status: Literal["locked", "released"] = Field(description=_LOCK_DESC)
 
 
 class PaperListResponse(BaseModel):
@@ -114,3 +136,30 @@ class PaperAuthorizeResponse(BaseModel):
     paper_id: uuid.UUID
     centre_id: uuid.UUID
     authorized_at: datetime
+
+
+class PaperScheduleHistoryItem(BaseModel):
+    """
+    Phase 6H: one successful release-time change. Narrow on purpose:
+    only the paper, who/what/when, and the old/new instants (UTC).
+    actor_username is a human-readable convenience (same as the audit-log
+    API); no secrets or unrelated audit metadata are included.
+    """
+
+    history_id: uuid.UUID
+    paper_id: uuid.UUID
+    action: str
+    previous_release_timestamp: datetime
+    new_release_timestamp: datetime
+    actor_id: uuid.UUID
+    actor_username: str | None = None
+    created_at: datetime
+
+
+class PaperScheduleHistoryResponse(BaseModel):
+    """Phase 6H: paginated envelope (same shape as GET /papers), oldest first."""
+
+    items: list[PaperScheduleHistoryItem]
+    total: int
+    page: int
+    page_size: int

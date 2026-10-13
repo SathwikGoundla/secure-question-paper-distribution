@@ -65,6 +65,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 
 from sqlalchemy.orm import Session
 
@@ -81,6 +82,8 @@ from app.exceptions.base import (
 from app.models.exam_centre import ExamCentre
 from app.models.paper import Paper
 from app.models.paper_authorization import PaperAuthorization
+from app.models.paper_schedule_history import PaperScheduleHistory
+from app.models.user import User
 from app.services import crypto_service
 from app.services.audit_service import record_audit_event, record_security_event
 from app.services.authorization_service import is_centre_authorized_for_paper
@@ -116,6 +119,22 @@ def is_released(release_timestamp: datetime, now: datetime | None = None) -> boo
     release instant the paper counts as released (>=).
     """
     return (now or datetime.now(timezone.utc)) >= release_timestamp
+
+
+def lock_status_for(release_timestamp: datetime, now: datetime | None = None) -> Literal["locked", "released"]:
+    """
+    Phase 6H. The ONE place that turns the shared is_released() decision
+    into the "locked"/"released" label exposed by the API. Every response
+    that carries lock_status goes through here, so no endpoint can word
+    the release state differently from the time-lock that governs
+    retrieval. Computed per call from the stored release time and the
+    backend clock; never persisted.
+
+    Meaning: "released" = the scheduled release time has been reached by
+    the SERVER clock. It does NOT mean any centre has opened the paper
+    (see PROJECT_STATE.md Phase 6H, \"access history\").
+    """
+    return "released" if is_released(release_timestamp, now) else "locked"
 
 
 def _validate_pdf_upload(filename: str | None, content_type: str | None, file_bytes: bytes) -> None:
@@ -531,6 +550,8 @@ def reschedule_paper_release(
 ) -> Paper:
     """
     Phase 6G. Admin-only change of a paper's release time.
+    Phase 6H: every effective change is also recorded (old and new
+    values) in paper_schedule_history, atomically with the update.
 
     This edits the stored release_timestamp ONLY. It is not a second
     time-lock: retrieve_paper's check (via is_released) is still the
@@ -545,17 +566,29 @@ def reschedule_paper_release(
         instantly unlock a paper;
       * a paper whose release time has ALREADY passed cannot be
         rescheduled (409): centres may already have retrieved it, so
-        "re-locking" it would be meaningless and misleading.
-    Setting the same instant again is accepted as a no-op (no audit).
+        \"re-locking\" it would be meaningless and misleading.
+    Setting the same instant again is accepted as a no-op (no audit, no
+    history row).
 
-    The paper row is read FOR UPDATE so two concurrent reschedules are
-    serialised on PostgreSQL (SQLite ignores the clause; last write
-    wins there, which only matters for the test backend).
+    Concurrency: the paper row is read FOR UPDATE with
+    populate_existing(). The earlier existence check loads the Paper
+    into the session's identity map; without populate_existing() the
+    locked SELECT would NOT overwrite that already-loaded (possibly
+    stale) object, so a reschedule that waited on another admin's
+    transaction would record the wrong \"previous\" value in the history.
+    With it, the previous value is always the value committed by the
+    last completed reschedule. On PostgreSQL concurrent reschedules are
+    serialised by the row lock; SQLite ignores FOR UPDATE (test backend
+    only).
+
+    Atomicity: the release_timestamp update and the history row are
+    added to the same session and committed ONCE. If either fails, both
+    roll back. The audit event (best-effort ledger forwarding, its own
+    commit) is written only AFTER that commit succeeds, so a rolled-back
+    change never leaves a success audit event.
 
     release_timestamp is not on the blockchain (the Fabric payload never
-    carried it), so there is no ledger value to keep consistent. The
-    audit event does not record the old/new values — audit_events has no
-    column for them (known limitation, see PROJECT_STATE.md).
+    carried it), so there is no ledger value to keep consistent.
     """
     get_paper_by_id_or_404(db, paper_id)
 
@@ -564,7 +597,13 @@ def reschedule_paper_release(
     if new_ts <= now:
         raise ValidationFailedException("The new release time must be in the future.")
 
-    paper = db.query(Paper).filter(Paper.paper_id == paper_id).with_for_update().one()
+    paper = (
+        db.query(Paper)
+        .filter(Paper.paper_id == paper_id)
+        .with_for_update()
+        .populate_existing()
+        .one()
+    )
 
     if is_released(paper.release_timestamp, now):
         record_audit_event(
@@ -576,12 +615,26 @@ def reschedule_paper_release(
         )
         raise ConflictException("This paper has already been released and can no longer be rescheduled.")
 
-    if new_ts == paper.release_timestamp:
+    previous_ts = paper.release_timestamp
+    if new_ts == previous_ts:
         db.rollback()  # release the row lock; nothing changed
         return paper
 
-    paper.release_timestamp = new_ts
-    db.commit()
+    try:
+        paper.release_timestamp = new_ts
+        db.add(
+            PaperScheduleHistory(
+                paper_id=paper_id,
+                actor_id=admin_user.user_id,
+                action="RESCHEDULED",
+                previous_release_timestamp=previous_ts,
+                new_release_timestamp=new_ts,
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(paper)
 
     record_audit_event(
@@ -592,6 +645,33 @@ def reschedule_paper_release(
         paper_id=paper_id,
     )
     return paper
+
+
+def list_schedule_history(
+    db: Session, paper_id: uuid.UUID, page: int, page_size: int
+) -> tuple[list[tuple[PaperScheduleHistory, str | None]], int]:
+    """
+    Phase 6H. Release-schedule history of one paper, oldest first
+    (created_at ASC, history_id ASC as a stable tie-breaker). Admin-only
+    at the router. Raises 404 for an unknown paper_id (same convention
+    as every other paper endpoint). Returns (rows, total) where each row
+    is (history, actor_username_or_None); the username comes from a LEFT
+    OUTER JOIN on users, mirroring audit_service.list_audit_events.
+    """
+    get_paper_by_id_or_404(db, paper_id)
+
+    base = db.query(PaperScheduleHistory).filter(PaperScheduleHistory.paper_id == paper_id)
+    total = base.count()
+    rows = (
+        db.query(PaperScheduleHistory, User.username)
+        .outerjoin(User, User.user_id == PaperScheduleHistory.actor_id)
+        .filter(PaperScheduleHistory.paper_id == paper_id)
+        .order_by(PaperScheduleHistory.created_at.asc(), PaperScheduleHistory.history_id.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return [(history, username) for history, username in rows], total
 
 
 def retrieve_paper(db: Session, current_user: CurrentUser, paper_id: uuid.UUID) -> bytes:

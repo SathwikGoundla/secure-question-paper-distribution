@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../../hooks/useAuth";
-import { useNow } from "../../hooks/useNow";
 import { listPapers } from "../../api/endpoints";
 import type { PaperListItemResponse } from "../../types/papers";
 import { LoadingIndicator } from "../../components/common/LoadingIndicator";
@@ -16,17 +15,17 @@ const PAGE_SIZE = 100; // backend maximum for GET /papers
  * for this role returns ONLY papers the centre is currently authorized
  * for (backend/app/services/paper_service.list_papers).
  *
- * "Authorized papers" is the backend's own total. The backend paper
- * `status` never changes to "released" (it stays "registered"), so a
- * locked/released split cannot come from the backend. The split shown
- * here compares each backend-supplied scheduled release time with this
- * device's clock, is labelled as informational, and is shown only when
- * every authorized paper was fetched. It never gates any action — the
- * server decides at retrieval time.
+ * "Authorized papers" is the backend's own total. `status` is the
+ * REGISTRATION status (it stays "registered"); the release state comes
+ * from the backend's own `lock_status` on each paper, computed by the
+ * server clock when the list was fetched (Phase 6H). This page no longer
+ * consults the device clock. The split is shown only when every
+ * authorized paper was fetched, reflects the moment the page was
+ * loaded, and never gates any action — the server decides again at
+ * retrieval time.
  */
 export function ExamCentreDashboardPage() {
   const { user } = useAuth();
-  const now = useNow(30_000);
 
   const [papers, setPapers] = useState<PaperListItemResponse[]>([]);
   const [total, setTotal] = useState(0);
@@ -53,7 +52,7 @@ export function ExamCentreDashboardPage() {
   }, []);
 
   const haveAll = papers.length === total;
-  const reached = papers.filter((p) => new Date(p.release_timestamp).getTime() <= now).length;
+  const reached = papers.filter((p) => p.lock_status === "released").length;
   const scheduled = papers.length - reached;
 
   return (
@@ -83,14 +82,14 @@ export function ExamCentreDashboardPage() {
             {haveAll && total > 0 && (
               <>
                 <div className="dashboard-card">
-                  <h2>Release time reached</h2>
+                  <h2>Release state: released</h2>
                   <p className="dashboard-metric">{reached}</p>
-                  <p>Scheduled time has passed on this device. The server decides at retrieval.</p>
+                  <p>The server reported the scheduled release time as reached when this page loaded. Not a record of anyone opening a paper.</p>
                 </div>
                 <div className="dashboard-card">
-                  <h2>Scheduled / locked</h2>
+                  <h2>Release state: locked</h2>
                   <p className="dashboard-metric">{scheduled}</p>
-                  <p>Scheduled release time is still in the future on this device.</p>
+                  <p>The server reported the scheduled release time as still in the future when this page loaded.</p>
                 </div>
               </>
             )}
@@ -107,7 +106,8 @@ export function ExamCentreDashboardPage() {
                     <th>Subject</th>
                     <th>Paper ID</th>
                     <th>Scheduled release</th>
-                    <th>Status</th>
+                    <th>Registration status</th>
+                    <th>Release state</th>
                     <th>Authorization</th>
                     <th>Action</th>
                   </tr>
@@ -120,6 +120,9 @@ export function ExamCentreDashboardPage() {
                       <td>{new Date(paper.release_timestamp).toLocaleString()}</td>
                       <td>
                         <span className="status-badge">{paper.status}</span>
+                      </td>
+                      <td>
+                        <span className="status-badge">{paper.lock_status === "released" ? "Released" : "Locked"}</span>
                       </td>
                       <td>
                         <span className="status-badge status-ok">Authorized</span>

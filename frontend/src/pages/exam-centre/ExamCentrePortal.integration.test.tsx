@@ -22,6 +22,7 @@ const FUTURE = "2099-01-01T09:00:00Z";
 
 function paper(id: string, subject: string, release: string) {
   return {
+    lock_status: release === PAST ? "released" : "locked",
     paper_id: id,
     subject,
     status: "registered",
@@ -43,7 +44,7 @@ function detailRoutes(release: string, retrieve: () => Response, id = "p1") {
     "/auth/me": CENTRE_ME,
     [`/papers/${id}/retrieve`]: retrieve,
     [`/papers/${id}/status`]: () =>
-      jsonResponse(200, { paper_id: id, status: p.status, release_timestamp: release }),
+      jsonResponse(200, { paper_id: id, status: p.status, release_timestamp: release, lock_status: p.lock_status }),
     [`/papers/${id}`]: () =>
       jsonResponse(200, {
         paper_id: id,
@@ -52,6 +53,7 @@ function detailRoutes(release: string, retrieve: () => Response, id = "p1") {
         sha256_hash: p.sha256_hash,
         release_timestamp: release,
         created_at: p.created_at,
+        lock_status: p.lock_status,
       }),
   };
 }
@@ -181,9 +183,36 @@ describe("Exam Centre Portal — paper list", () => {
     expect(screen.queryByText(/some other paper/i)).not.toBeInTheDocument();
     // Summary values derived from the two returned rows.
     expect(screen.getByRole("heading", { name: /^authorized papers$/i }).parentElement).toHaveTextContent("2");
-    expect(screen.getByRole("heading", { name: /^release time reached$/i }).parentElement).toHaveTextContent("1");
-    expect(screen.getByRole("heading", { name: /^scheduled \/ locked$/i }).parentElement).toHaveTextContent("1");
+    expect(screen.getByRole("heading", { name: /^release state: released$/i }).parentElement).toHaveTextContent("1");
+    expect(screen.getByRole("heading", { name: /^release state: locked$/i }).parentElement).toHaveTextContent("1");
     expect(screen.getAllByRole("link", { name: /view details/i })).toHaveLength(2);
+  });
+
+  it("takes locked/released from the server's lock_status, not from the device clock (Phase 6H)", async () => {
+    seedAuthenticatedSession();
+    // Timestamps deliberately contradict the server's answer: the PAST-dated paper is reported
+    // "locked" and the far-future one "released". The UI must follow the server.
+    const contradictory = [
+      { ...paper("p1", "Server Says Locked", PAST), lock_status: "locked" },
+      { ...paper("p2", "Server Says Released", FUTURE), lock_status: "released" },
+      { ...paper("p3", "Also Released", FUTURE), lock_status: "released" },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      routedFetchMock({
+        "/auth/me": CENTRE_ME,
+        "/papers?": () => jsonResponse(200, { items: contradictory, total: 3, page: 1, page_size: 100 }),
+      }),
+    );
+    renderWithProviders(<AppRoutes />, { route: "/exam-centre" });
+
+    await screen.findByText("Server Says Locked");
+    expect(screen.getByRole("heading", { name: /^release state: released$/i }).parentElement).toHaveTextContent("2");
+    expect(screen.getByRole("heading", { name: /^release state: locked$/i }).parentElement).toHaveTextContent("1");
+    expect(screen.getAllByText("Released")).toHaveLength(2);
+    expect(screen.getAllByText("Locked")).toHaveLength(1);
+    // Registration status stays a separate column and is not reworded as a release state.
+    expect(screen.getAllByText("registered")).toHaveLength(3);
   });
 
   it("shows an empty state when no paper is authorized", async () => {

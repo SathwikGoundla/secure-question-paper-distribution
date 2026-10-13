@@ -272,6 +272,7 @@ def test_register_response_schema_only_exposes_safe_fields(client, admin_princip
         "release_timestamp",
         "created_at",
         "ledger_tx_reference",
+        "lock_status",  # Phase 6H: computed release state; not a secret
     }
     assert set(body.keys()) <= allowed_keys
 

@@ -37,6 +37,7 @@ const metadataResponse = jsonResponse(200, {
   sha256_hash: "a".repeat(64),
   release_timestamp: "2026-01-01T00:00:00Z",
   created_at: "2025-12-01T00:00:00Z",
+  lock_status: "released",
 });
 
 const statusResponse = jsonResponse(200, {
@@ -47,6 +48,10 @@ const statusResponse = jsonResponse(200, {
 
 const meResponse = jsonResponse(200, { username: "admin1", role: "Admin" });
 
+// Phase 6H: the page also requests GET /papers/{id}/schedule-history. The mock router matches by
+// URL substring, so this route must precede "/schedule" and "/papers/{id}" in each route table.
+const emptyHistoryResponse = jsonResponse(200, { items: [], total: 0, page: 1, page_size: 100 });
+
 describe("PaperDetailPage — Phase 6F revoke authorization", () => {
   beforeEach(() => {
     sessionStorage.clear();
@@ -56,6 +61,7 @@ describe("PaperDetailPage — Phase 6F revoke authorization", () => {
   it("renders the revoke section once the paper loads", async () => {
     const fetchMock = routedFetchMock({
       "/auth/me": () => meResponse,
+      "/schedule-history": () => emptyHistoryResponse,
       "/status": () => statusResponse,
       [`/papers/${PAPER_ID}`]: () => metadataResponse,
     });
@@ -70,6 +76,7 @@ describe("PaperDetailPage — Phase 6F revoke authorization", () => {
   it("shows a validation error and does not call the API when the centre ID is empty", async () => {
     const fetchMock = routedFetchMock({
       "/auth/me": () => meResponse,
+      "/schedule-history": () => emptyHistoryResponse,
       "/status": () => statusResponse,
       [`/papers/${PAPER_ID}`]: () => metadataResponse,
     });
@@ -87,6 +94,7 @@ describe("PaperDetailPage — Phase 6F revoke authorization", () => {
   it("shows a success message on a successful revoke and clears the input", async () => {
     const fetchMock = routedFetchMock({
       "/auth/me": () => meResponse,
+      "/schedule-history": () => emptyHistoryResponse,
       "/status": () => statusResponse,
       "/revoke": () =>
         jsonResponse(200, {
@@ -120,6 +128,7 @@ describe("PaperDetailPage — Phase 6F revoke authorization", () => {
   it("displays the backend's error message when revoke fails", async () => {
     const fetchMock = routedFetchMock({
       "/auth/me": () => meResponse,
+      "/schedule-history": () => emptyHistoryResponse,
       "/status": () => statusResponse,
       "/revoke": () =>
         jsonResponse(400, {
@@ -157,6 +166,7 @@ describe("PaperDetailPage — Phase 6G release scheduling", () => {
     renderPaperDetail(
       routedFetchMock({
         "/auth/me": () => meResponse,
+        "/schedule-history": () => emptyHistoryResponse,
         "/status": () => lockedStatus,
         [`/papers/${PAPER_ID}`]: () => metadataResponse,
       }),
@@ -170,6 +180,7 @@ describe("PaperDetailPage — Phase 6G release scheduling", () => {
     renderPaperDetail(
       routedFetchMock({
         "/auth/me": () => meResponse,
+        "/schedule-history": () => emptyHistoryResponse,
         "/status": () => statusResponse, // lock_status: "released"
         [`/papers/${PAPER_ID}`]: () => metadataResponse,
       }),
@@ -183,6 +194,7 @@ describe("PaperDetailPage — Phase 6G release scheduling", () => {
   it("validates an empty value without sending a request", async () => {
     const fetchMock = routedFetchMock({
       "/auth/me": () => meResponse,
+      "/schedule-history": () => emptyHistoryResponse,
       "/status": () => lockedStatus,
       [`/papers/${PAPER_ID}`]: () => metadataResponse,
     });
@@ -199,6 +211,7 @@ describe("PaperDetailPage — Phase 6G release scheduling", () => {
     const expectedIso = new Date(local).toISOString();
     const fetchMock = routedFetchMock({
       "/auth/me": () => meResponse,
+      "/schedule-history": () => emptyHistoryResponse,
       "/status": () => lockedStatus,
       "/schedule": () =>
         jsonResponse(200, { paper_id: PAPER_ID, release_timestamp: expectedIso, lock_status: "locked" }),
@@ -212,7 +225,9 @@ describe("PaperDetailPage — Phase 6G release scheduling", () => {
 
     expect(await screen.findByRole("status")).toHaveTextContent(/release time updated/i);
 
-    const call = fetchMock.mock.calls.find(([url]) => String(url).includes("/schedule"));
+    const call = fetchMock.mock.calls.find(
+      ([url, i]) => String(url).includes("/schedule") && (i as RequestInit)?.method === "PATCH",
+    );
     expect(call).toBeDefined();
     const [url, init] = call as [string, RequestInit];
     expect(String(url)).toContain(`/papers/${PAPER_ID}/schedule`);
@@ -225,6 +240,7 @@ describe("PaperDetailPage — Phase 6G release scheduling", () => {
     renderPaperDetail(
       routedFetchMock({
         "/auth/me": () => meResponse,
+        "/schedule-history": () => emptyHistoryResponse,
         "/status": () => lockedStatus,
         "/schedule": () =>
           jsonResponse(400, { error: { message: "The new release time must be in the future.", status_code: 400 } }),
@@ -237,5 +253,196 @@ describe("PaperDetailPage — Phase 6G release scheduling", () => {
     await userEvent.click(screen.getByRole("button", { name: /reschedule release/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("The new release time must be in the future.");
+  });
+});
+
+
+describe("PaperDetailPage — Phase 6H lifecycle labels and schedule history", () => {
+  const lockedStatus = () =>
+    jsonResponse(200, {
+      paper_id: PAPER_ID,
+      status: "registered",
+      release_timestamp: "2099-01-01T00:00:00Z",
+      lock_status: "locked",
+    });
+  const lockedMetadata = () =>
+    jsonResponse(200, {
+      paper_id: PAPER_ID,
+      subject: "Sample Subject",
+      status: "registered",
+      sha256_hash: "a".repeat(64),
+      release_timestamp: "2099-01-01T00:00:00Z",
+      created_at: "2025-12-01T00:00:00Z",
+      lock_status: "locked",
+    });
+  const historyEntry = (id: string, who: string, prev: string, next: string) => ({
+    history_id: id,
+    paper_id: PAPER_ID,
+    action: "RESCHEDULED",
+    previous_release_timestamp: prev,
+    new_release_timestamp: next,
+    actor_id: "33333333-3333-3333-3333-333333333333",
+    actor_username: who,
+    created_at: "2026-02-01T10:00:00Z",
+  });
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("separates registration status from the server-reported release state", async () => {
+    renderPaperDetail(
+      routedFetchMock({
+        "/auth/me": () => meResponse,
+        "/schedule-history": () => emptyHistoryResponse,
+        "/status": lockedStatus,
+        [`/papers/${PAPER_ID}`]: lockedMetadata,
+      }),
+    );
+
+    expect(await screen.findByText("Registration status")).toBeInTheDocument();
+    expect(screen.getByText("registered")).toBeInTheDocument();
+    expect(screen.getByText("Release state")).toBeInTheDocument();
+    expect(screen.getByText("Locked")).toBeInTheDocument();
+    // The wording must not suggest that anyone has opened the paper.
+    expect(screen.getByText(/not that any centre has opened the paper/i)).toBeInTheDocument();
+  });
+
+  it("follows the server, not the browser clock, when they disagree", async () => {
+    // Release time is long past by the browser's clock, yet the server says the paper is locked.
+    renderPaperDetail(
+      routedFetchMock({
+        "/auth/me": () => meResponse,
+        "/schedule-history": () => emptyHistoryResponse,
+        "/status": () =>
+          jsonResponse(200, {
+            paper_id: PAPER_ID,
+            status: "registered",
+            release_timestamp: "2000-01-01T00:00:00Z",
+            lock_status: "locked",
+          }),
+        [`/papers/${PAPER_ID}`]: () =>
+          jsonResponse(200, {
+            paper_id: PAPER_ID,
+            subject: "Sample Subject",
+            status: "registered",
+            sha256_hash: "a".repeat(64),
+            release_timestamp: "2000-01-01T00:00:00Z",
+            created_at: "2025-12-01T00:00:00Z",
+            lock_status: "locked",
+          }),
+      }),
+    );
+
+    expect(await screen.findByText("Locked")).toBeInTheDocument();
+    expect(screen.queryByText("Released")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reschedule release/i })).toBeInTheDocument();
+  });
+
+  it("shows an empty state when the release time was never changed", async () => {
+    renderPaperDetail(
+      routedFetchMock({
+        "/auth/me": () => meResponse,
+        "/schedule-history": () => emptyHistoryResponse,
+        "/status": lockedStatus,
+        [`/papers/${PAPER_ID}`]: lockedMetadata,
+      }),
+    );
+    expect(await screen.findByText(/release time has not been changed since this paper was registered/i)).toBeInTheDocument();
+  });
+
+  it("lists previous and new release times, who changed them, in the order the server returned", async () => {
+    renderPaperDetail(
+      routedFetchMock({
+        "/auth/me": () => meResponse,
+        "/schedule-history": () =>
+          jsonResponse(200, {
+            items: [
+              historyEntry("h1", "first.admin", "2099-01-01T00:00:00Z", "2099-02-01T00:00:00Z"),
+              historyEntry("h2", "second.admin", "2099-02-01T00:00:00Z", "2099-03-01T00:00:00Z"),
+            ],
+            total: 2,
+            page: 1,
+            page_size: 100,
+          }),
+        "/status": lockedStatus,
+        [`/papers/${PAPER_ID}`]: lockedMetadata,
+      }),
+    );
+
+    const heading = await screen.findByRole("heading", { name: /release schedule history/i });
+    const table = await screen.findByRole("table");
+    expect(heading).toBeInTheDocument();
+    const rows = Array.from(table.querySelectorAll("tbody tr"));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("first.admin");
+    expect(rows[1]).toHaveTextContent("second.admin");
+    // Four timestamp-ish cells per row: changed-at, previous, new (plus the actor cell).
+    expect(rows[0].querySelectorAll("td")).toHaveLength(4);
+    expect(rows[0].querySelectorAll("td")[2].getAttribute("title")).toBe("2099-01-01T00:00:00Z");
+    expect(rows[0].querySelectorAll("td")[3].getAttribute("title")).toBe("2099-02-01T00:00:00Z");
+  });
+
+  it("shows a history error without hiding the paper or its controls", async () => {
+    renderPaperDetail(
+      routedFetchMock({
+        "/auth/me": () => meResponse,
+        "/schedule-history": () =>
+          jsonResponse(500, { error: { message: "History unavailable right now.", status_code: 500 } }),
+        "/status": lockedStatus,
+        [`/papers/${PAPER_ID}`]: lockedMetadata,
+      }),
+    );
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText("Registration status")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reschedule release/i })).toBeInTheDocument();
+  });
+
+  it("tolerates a malformed history payload", async () => {
+    renderPaperDetail(
+      routedFetchMock({
+        "/auth/me": () => meResponse,
+        "/schedule-history": () => jsonResponse(200, { unexpected: true }),
+        "/status": lockedStatus,
+        [`/papers/${PAPER_ID}`]: lockedMetadata,
+      }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(/unable to load the release schedule history/i);
+    expect(screen.getByRole("button", { name: /reschedule release/i })).toBeInTheDocument();
+  });
+
+  it("re-fetches the history from the server after a successful reschedule (no stale or optimistic rows)", async () => {
+    const local = "2099-06-15T10:30";
+    const expectedIso = new Date(local).toISOString();
+    let rescheduled = false;
+    const fetchMock = routedFetchMock({
+      "/auth/me": () => meResponse,
+      "/schedule-history": () =>
+        jsonResponse(200, {
+          items: rescheduled ? [historyEntry("h1", "admin1", "2099-01-01T00:00:00Z", expectedIso)] : [],
+          total: rescheduled ? 1 : 0,
+          page: 1,
+          page_size: 100,
+        }),
+      "/schedule": () => {
+        rescheduled = true;
+        return jsonResponse(200, { paper_id: PAPER_ID, release_timestamp: expectedIso, lock_status: "locked" });
+      },
+      "/status": lockedStatus,
+      [`/papers/${PAPER_ID}`]: lockedMetadata,
+    });
+    renderPaperDetail(fetchMock);
+
+    await screen.findByText(/release time has not been changed/i);
+    fireEvent.change(await screen.findByLabelText(/new release time/i), { target: { value: local } });
+    await userEvent.click(screen.getByRole("button", { name: /reschedule release/i }));
+
+    const table = await screen.findByRole("table");
+    expect(table.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(screen.queryByText(/release time has not been changed/i)).not.toBeInTheDocument();
+    const historyCalls = fetchMock.mock.calls.filter(([u]) => String(u).includes("/schedule-history"));
+    expect(historyCalls.length).toBeGreaterThanOrEqual(2); // initial load + refetch after the PATCH
   });
 });

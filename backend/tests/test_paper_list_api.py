@@ -134,6 +134,7 @@ def test_response_schema_excludes_sensitive_fields(client, admin_principal):
     allowed_keys = {
         "paper_id", "subject", "status", "sha256_hash",
         "release_timestamp", "created_at", "ledger_tx_reference",
+        "lock_status",  # Phase 6H: computed release state; not a secret
     }
     for item in response.json()["items"]:
         assert set(item.keys()) <= allowed_keys

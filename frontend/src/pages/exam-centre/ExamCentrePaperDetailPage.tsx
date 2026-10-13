@@ -101,9 +101,16 @@ export function ExamCentrePaperDetailPage() {
       <dl className="detail-list">
         <dt>Paper ID</dt>
         <dd className="mono">{metadata.paper_id}</dd>
-        <dt>Status</dt>
+        <dt>Registration status</dt>
         <dd>
           <span className="status-badge">{statusInfo?.status ?? metadata.status}</span>
+        </dd>
+        <dt>Release state</dt>
+        <dd>
+          <span className="status-badge">
+            {(statusInfo?.lock_status ?? metadata.lock_status) === "released" ? "Released" : "Locked"}
+          </span>{" "}
+          (server clock; released means the scheduled time has been reached)
         </dd>
         <dt>Authorization</dt>
         <dd>
@@ -117,7 +124,7 @@ export function ExamCentrePaperDetailPage() {
         <dd>Verified by the server at retrieval time; no result is available before then.</dd>
       </dl>
 
-      {msUntilRelease > 0 && !objectUrl && (
+      {(statusInfo?.lock_status ?? metadata.lock_status) === "locked" && msUntilRelease > 0 && !objectUrl && (
         <p className="notice notice-locked" role="status">
           Scheduled release in <strong>{formatRemaining(msUntilRelease)}</strong> (device clock, for
           information only — the server decides whether the paper can be released).

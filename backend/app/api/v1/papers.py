@@ -34,6 +34,8 @@ from app.schemas.papers import (
     PaperMetadataResponse,
     PaperRegisterResponse,
     PaperRescheduleRequest,
+    PaperScheduleHistoryItem,
+    PaperScheduleHistoryResponse,
     PaperScheduleResponse,
     PaperStatusResponse,
 )
@@ -64,7 +66,19 @@ def list_papers(
         db, current_user, page=page, page_size=page_size, status_filter=status_filter
     )
     return PaperListResponse(
-        items=[PaperListItemResponse.model_validate(p) for p in items],
+        items=[
+            PaperListItemResponse(
+                paper_id=p.paper_id,
+                subject=p.subject,
+                status=p.status,
+                sha256_hash=p.sha256_hash,
+                release_timestamp=p.release_timestamp,
+                created_at=p.created_at,
+                ledger_tx_reference=p.ledger_tx_reference,
+                lock_status=paper_service.lock_status_for(p.release_timestamp),
+            )
+            for p in items
+        ],
         total=total,
         page=page,
         page_size=page_size,
@@ -112,6 +126,7 @@ def register_paper(
         # write failed/was unreachable, or if BLOCKCHAIN_BACKEND is
         # misconfigured — never fabricated here or anywhere else).
         ledger_tx_reference=paper.ledger_tx_reference,
+        lock_status=paper_service.lock_status_for(paper.release_timestamp),
     )
 
 
@@ -133,6 +148,7 @@ def get_paper_metadata(
         sha256_hash=paper.sha256_hash,
         release_timestamp=paper.release_timestamp,
         created_at=paper.created_at,
+        lock_status=paper_service.lock_status_for(paper.release_timestamp),
     )
 
 
@@ -217,7 +233,7 @@ def paper_status(
         paper_id=paper.paper_id,
         status=paper.status,
         release_timestamp=paper.release_timestamp,
-        lock_status="released" if paper_service.is_released(paper.release_timestamp) else "locked",
+        lock_status=paper_service.lock_status_for(paper.release_timestamp),
     )
 
 
@@ -241,5 +257,49 @@ def reschedule_paper_release(
     return PaperScheduleResponse(
         paper_id=paper.paper_id,
         release_timestamp=paper.release_timestamp,
-        lock_status="released" if paper_service.is_released(paper.release_timestamp) else "locked",
+        lock_status=paper_service.lock_status_for(paper.release_timestamp),
+    )
+
+
+@router.get(
+    "/{paper_id}/schedule-history",
+    response_model=PaperScheduleHistoryResponse,
+    summary="Release-schedule history of a paper (Admin only)",
+    responses={
+        401: {"description": "Not authenticated."},
+        403: {"description": "Authenticated but not an Admin."},
+        404: {"description": "Unknown paper_id."},
+    },
+)
+def paper_schedule_history(
+    paper_id: UUID,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(require_role("Admin")),
+) -> PaperScheduleHistoryResponse:
+    """
+    Phase 6H. Admin-only. Every successful change of this paper's release
+    time, oldest first (previous and new instants in UTC, who changed it,
+    and when). Rejected attempts and same-time no-ops are not listed.
+    This is read-only and writes no audit event.
+    """
+    rows, total = paper_service.list_schedule_history(db, paper_id, page=page, page_size=page_size)
+    return PaperScheduleHistoryResponse(
+        items=[
+            PaperScheduleHistoryItem(
+                history_id=h.history_id,
+                paper_id=h.paper_id,
+                action=h.action,
+                previous_release_timestamp=h.previous_release_timestamp,
+                new_release_timestamp=h.new_release_timestamp,
+                actor_id=h.actor_id,
+                actor_username=username,
+                created_at=h.created_at,
+            )
+            for h, username in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
     )

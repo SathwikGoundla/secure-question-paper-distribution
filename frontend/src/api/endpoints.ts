@@ -22,6 +22,7 @@ import type {
   NotImplementedResponse,
   PaperAuthorizeRequest,
   PaperAuthorizeResponse,
+  PaperScheduleHistoryResponse,
   PaperScheduleResponse,
   PaperListResponse,
   PaperMetadataResponse,
@@ -168,6 +169,16 @@ export function reschedulePaperRelease(
   return apiRequest<PaperScheduleResponse>(`/papers/${paperId}/schedule`, {
     method: "PATCH",
     body: { release_timestamp: releaseTimestamp },
+  });
+}
+
+/**
+ * GET /api/v1/papers/{paper_id}/schedule-history — Admin-only (Phase 6H).
+ * Every successful release-time change, oldest first.
+ */
+export function getPaperScheduleHistory(paperId: string): Promise<PaperScheduleHistoryResponse> {
+  return apiRequest<PaperScheduleHistoryResponse>(`/papers/${paperId}/schedule-history?page_size=100`, {
+    method: "GET",
   });
 }
 

@@ -257,6 +257,7 @@ def test_registration_response_schema_still_only_exposes_safe_fields(client, adm
     allowed_keys = {
         "paper_id", "subject", "status", "sha256_hash", "encryption_algorithm",
         "release_timestamp", "created_at", "ledger_tx_reference",
+        "lock_status",  # Phase 6H: computed release state; not a secret
     }
     assert set(body.keys()) <= allowed_keys
     assert body["ledger_tx_reference"] is not None  # stub backend — real value this time

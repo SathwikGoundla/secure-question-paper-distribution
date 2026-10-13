@@ -14,6 +14,7 @@ Table -> LLD reference:
   otp_codes              -> LLD 7.8
   auth_sessions          -> LLD 7.9
   exam_security_events   -> LLD 7.10 (Faculty-Review Addition)
+  paper_schedule_history -> Phase 6H addition (not an LLD table; see model docstring)
 """
 
 from app.models.role import Role  # noqa: F401
@@ -26,6 +27,7 @@ from app.models.security_event import SecurityEvent  # noqa: F401
 from app.models.otp_code import OtpCode  # noqa: F401
 from app.models.auth_session import AuthSession  # noqa: F401
 from app.models.exam_security_event import ExamSecurityEvent  # noqa: F401
+from app.models.paper_schedule_history import PaperScheduleHistory  # noqa: F401
 
 __all__ = [
     "Role",
@@ -38,4 +40,5 @@ __all__ = [
     "OtpCode",
     "AuthSession",
     "ExamSecurityEvent",
+    "PaperScheduleHistory",
 ]

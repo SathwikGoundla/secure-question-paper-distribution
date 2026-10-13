@@ -3,12 +3,17 @@ import { Link, useParams } from "react-router-dom";
 import {
   authorizeCentre,
   getPaperMetadata,
+  getPaperScheduleHistory,
   getPaperStatus,
   reschedulePaperRelease,
   revokeCentre,
 } from "../../../api/endpoints";
 import { ApiError } from "../../../types/api";
-import type { PaperMetadataResponse, PaperStatusResponse } from "../../../types/papers";
+import type {
+  PaperMetadataResponse,
+  PaperScheduleHistoryItem,
+  PaperStatusResponse,
+} from "../../../types/papers";
 import { useKnownPapers } from "../../../hooks/useKnownPapers";
 import { LoadingIndicator } from "../../../components/common/LoadingIndicator";
 import { ErrorBanner } from "../../../components/common/ErrorBanner";
@@ -54,6 +59,31 @@ export function PaperDetailPage() {
   const [rescheduleError, setRescheduleError] = useState<string | null>(null);
   const [isRescheduling, setIsRescheduling] = useState(false);
 
+  // Phase 6H: release-schedule history (separate from the main page load, so
+  // a history failure never hides the paper itself).
+  const [history, setHistory] = useState<PaperScheduleHistoryItem[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  const loadHistory = useCallback(() => {
+    if (!paperId) return;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    getPaperScheduleHistory(paperId)
+      .then((data) => {
+        // Defensive: never trust the shape blindly.
+        if (!data || !Array.isArray(data.items)) throw new Error("unexpected history response");
+        setHistory(data.items);
+      })
+      .catch((err: unknown) => {
+        setHistory(null);
+        setHistoryError(
+          err instanceof ApiError ? err.userMessage : "Unable to load the release schedule history.",
+        );
+      })
+      .finally(() => setHistoryLoading(false));
+  }, [paperId]);
+
   const load = useCallback(() => {
     if (!paperId) return;
     setLoading(true);
@@ -79,7 +109,8 @@ export function PaperDetailPage() {
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadHistory();
+  }, [load, loadHistory]);
 
   async function handleAuthorize(event: FormEvent) {
     event.preventDefault();
@@ -139,6 +170,7 @@ export function PaperDetailPage() {
         `Release time updated to ${new Date(result.release_timestamp).toLocaleString()}.`,
       );
       setNewRelease("");
+      loadHistory(); // show the new entry; never patch history optimistically
     } catch (err) {
       setRescheduleError(err instanceof ApiError ? err.userMessage : "Unable to reschedule this paper.");
     } finally {
@@ -191,16 +223,22 @@ export function PaperDetailPage() {
       <dl className="detail-list">
         <dt>Paper ID</dt>
         <dd>{metadata.paper_id}</dd>
-        <dt>Status</dt>
+        <dt>Registration status</dt>
         <dd>
           <span className="status-badge">{statusInfo?.status ?? metadata.status}</span>
+          <span className="admin-page-note"> Whether the paper is registered in the system.</span>
         </dd>
         <dt>SHA-256 hash</dt>
         <dd className="mono">{metadata.sha256_hash}</dd>
         <dt>Release state</dt>
         <dd>
           <span className="status-badge">
-            {statusInfo?.lock_status === "released" ? "Released" : "Locked"}
+            {(statusInfo?.lock_status ?? metadata.lock_status) === "released" ? "Released" : "Locked"}
+          </span>
+          <span className="admin-page-note">
+            {" "}
+            Decided by the server clock. Released means the scheduled time has been reached, not that
+            any centre has opened the paper.
           </span>
         </dd>
         <dt>Scheduled release time</dt>
@@ -240,6 +278,47 @@ export function PaperDetailPage() {
             </Button>
           </form>
         </>
+      )}
+
+      <h2 className="admin-section-heading">Release schedule history</h2>
+      {historyLoading && (
+        // Plain text, not LoadingIndicator: that component is role="status", which would collide
+        // with the success banners on this page (also role="status") while history loads.
+        <p className="admin-page-note" aria-busy="true">
+          Loading schedule history…
+        </p>
+      )}
+      {!historyLoading && historyError && <ErrorBanner message={historyError} />}
+      {!historyLoading && !historyError && history !== null && history.length === 0 && (
+        <p className="admin-page-note">The release time has not been changed since this paper was registered.</p>
+      )}
+      {!historyLoading && !historyError && history !== null && history.length > 0 && (
+        <div className="table-scroll">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>Changed at</th>
+                <th>Changed by</th>
+                <th>Previous release time</th>
+                <th>New release time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((entry) => (
+                <tr key={entry.history_id}>
+                  <td title={entry.created_at}>{new Date(entry.created_at).toLocaleString()}</td>
+                  <td>{entry.actor_username ?? entry.actor_id}</td>
+                  <td title={entry.previous_release_timestamp}>
+                    {new Date(entry.previous_release_timestamp).toLocaleString()}
+                  </td>
+                  <td title={entry.new_release_timestamp}>
+                    {new Date(entry.new_release_timestamp).toLocaleString()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       <h2 className="admin-section-heading">Authorize an examination centre</h2>
