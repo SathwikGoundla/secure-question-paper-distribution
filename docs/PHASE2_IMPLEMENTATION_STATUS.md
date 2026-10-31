@@ -1,5 +1,8 @@
 # Phase 2 Implementation Status — Authentication Module
 
+> **HISTORICAL DOCUMENT — superseded.** This is the original Phase 2 report, written when no later phase existed. Statements such as "latest phase" or "not yet implemented" describe that moment only. The current, verified state is in `../PROJECT_STATE.md` and the READMEs.
+
+
 **Date:** 23 August 2026
 **Source documents:** PRD v2.1, SRS v1.1, HLD v1.1, LLD v1.1
 **Status: Phase 2 COMPLETE. Phase 3 not started.**

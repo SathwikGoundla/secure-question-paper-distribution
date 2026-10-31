@@ -372,27 +372,57 @@ def list_papers(
     return items, total
 
 
+_NOT_FOUND_MESSAGE = "The requested resource was not found."
+
+
 def get_paper_by_id_or_404(db: Session, paper_id: uuid.UUID) -> Paper:
     paper = db.get(Paper, paper_id)
     if paper is None:
-        raise NotFoundException("The requested resource was not found.")
+        raise NotFoundException(_NOT_FOUND_MESSAGE)
+    return paper
+
+
+def _get_paper_for_centre_or_404(db: Session, current_user: CurrentUser, paper_id: uuid.UUID, *, audit_denial: bool) -> Paper:
+    """
+    Phase 6I disclosure policy (see PROJECT_STATE.md Phase 6I). An
+    Examination Centre must not be able to tell a paper that does not exist
+    from a paper that exists but that the centre is not authorized for
+    (including one whose authorization was revoked). Both produce the SAME
+    404 with the SAME message, and no subject, hash or schedule is returned.
+
+    Authorization is still enforced first and in full: nothing about the
+    paper is returned unless a non-revoked authorization exists for this
+    exact (paper, centre). When the paper exists but access is denied, the
+    UNAUTHORIZED_ACCESS security event (and, for retrieval, the DENIED
+    access-attempt audit event) are still recorded. For an unknown paper
+    nothing can be recorded against a paper_id (foreign key), as before.
+    """
+    paper = db.get(Paper, paper_id)
+    authorized = (
+        paper is not None
+        and current_user.centre_id is not None
+        and is_centre_authorized_for_paper(db, current_user.centre_id, paper_id)
+    )
+    if not authorized:
+        if paper is not None:
+            if audit_denial:
+                record_audit_event(
+                    db, "PAPER_ACCESS_ATTEMPT", actor_id=current_user.user_id, outcome="DENIED", paper_id=paper_id
+                )
+            record_security_event(db, "UNAUTHORIZED_ACCESS", actor_id=current_user.user_id, paper_id=paper_id)
+        raise NotFoundException(_NOT_FOUND_MESSAGE)
     return paper
 
 
 def get_paper_metadata(db: Session, current_user: CurrentUser, paper_id: uuid.UUID) -> Paper:
-    """LLD API-05. Admin: any paper. Examination Centre: only an authorized paper."""
-    paper = get_paper_by_id_or_404(db, paper_id)
-
+    """
+    LLD API-05. Admin: any paper (404 if unknown). Examination Centre: only an
+    authorized paper; unknown and unauthorized are indistinguishable (Phase 6I
+    policy, see _get_paper_for_centre_or_404).
+    """
     if current_user.role_name == "Examination Centre":
-        if current_user.centre_id is None or not is_centre_authorized_for_paper(
-            db, current_user.centre_id, paper_id
-        ):
-            record_security_event(
-                db, "UNAUTHORIZED_ACCESS", actor_id=current_user.user_id, paper_id=paper_id
-            )
-            raise ForbiddenException("You are not authorized to access this paper.")
-
-    return paper
+        return _get_paper_for_centre_or_404(db, current_user, paper_id, audit_denial=False)
+    return get_paper_by_id_or_404(db, paper_id)
 
 
 def authorize_centre(
@@ -680,9 +710,9 @@ def retrieve_paper(db: Session, current_user: CurrentUser, paper_id: uuid.UUID) 
     (LLD Section 16's TimeLockCheck algorithm, Section 17's
     RetrievePaper algorithm):
 
-      1. Identify the paper (404 if unknown).
-      2. Verify examination-centre authorization (403 if not authorized
-         for THIS paper).
+      1+2. Identify the paper AND verify examination-centre authorization
+         together: 404 (identical body) whether the paper is unknown or
+         the centre is not authorized for it (Phase 6I; previously 403).
       3. Check the time-lock: current backend UTC time >=
          paper.release_timestamp (403 if not yet released — Phase 4).
       4. Retrieve ciphertext, AES-256-GCM decrypt (first tamper-
@@ -700,7 +730,7 @@ def retrieve_paper(db: Session, current_user: CurrentUser, paper_id: uuid.UUID) 
     SECURITY REASONING for checking authorization BEFORE time-lock
     (matching LLD Section 16 Step 2 before Steps 3-6, not the reverse):
     a centre with no legitimate claim on a paper at all should get a
-    uniform 403 "not authorized" WITHOUT ever learning whether that
+    uniform "not found" (Phase 6I; was 403) WITHOUT ever learning whether that
     paper is time-locked, already released, or even fully registered —
     revealing release-schedule information to an unauthorized party is
     itself a minor information leak this ordering avoids.
@@ -715,18 +745,7 @@ def retrieve_paper(db: Session, current_user: CurrentUser, paper_id: uuid.UUID) 
     does not change what Phase 3's existing tests assert (that the
     event exists at all after a successful end-to-end retrieval).
     """
-    paper = get_paper_by_id_or_404(db, paper_id)
-
-    if current_user.centre_id is None or not is_centre_authorized_for_paper(
-        db, current_user.centre_id, paper_id
-    ):
-        record_audit_event(
-            db, "PAPER_ACCESS_ATTEMPT", actor_id=current_user.user_id, outcome="DENIED", paper_id=paper_id
-        )
-        record_security_event(
-            db, "UNAUTHORIZED_ACCESS", actor_id=current_user.user_id, paper_id=paper_id
-        )
-        raise ForbiddenException("You are not authorized to access this paper.")
+    paper = _get_paper_for_centre_or_404(db, current_user, paper_id, audit_denial=True)
 
     # --- Phase 4: time-lock enforcement (SRS FR-012/FR-016; LLD Section 16) ---
     # Trusted BACKEND clock only — never a client-supplied value (SEC-006).

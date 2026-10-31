@@ -50,6 +50,18 @@ os.environ.setdefault(
 os.environ.setdefault("STORAGE_LOCAL_PATH", _TEST_STORAGE_DIR)
 os.environ.setdefault("STORAGE_BACKEND", "local")
 os.environ.setdefault("BLOCKCHAIN_BACKEND", "stub")
+# Phase 6I: the development-only OTP delivery (which logs the OTP) is OFF by default and must be
+# explicitly opted into, and only works when APP_ENV == "development". The test suite is a local
+# development context that needs to read the OTP, so it opts in here, exactly as a developer
+# would in a local .env. test_otp_delivery_security.py overrides both per test.
+os.environ.setdefault("APP_ENV", "development")
+os.environ.setdefault("OTP_DEV_LOG_ENABLED", "true")
+# Phase 7A: the default second factor in production is TOTP. The pre-7A suite exercises the
+# legacy development flow (password -> console OTP -> JWT), so it selects it explicitly; the
+# Phase 7A tests (test_totp_*.py) switch to "totp" per test. A dedicated random TOTP encryption
+# key is provided so TOTP tests can run; it is independent of the paper master key.
+os.environ.setdefault("AUTH_SECOND_FACTOR", "dev_console")
+os.environ.setdefault("TOTP_ENCRYPTION_KEY", base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
 
 from app.database import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402

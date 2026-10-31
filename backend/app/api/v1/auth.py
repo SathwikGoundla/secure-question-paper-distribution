@@ -17,6 +17,9 @@ service function is simply never called on a rate-limited request.
 
 import hashlib
 import logging
+import uuid
+
+import jwt as pyjwt
 
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
@@ -24,8 +27,12 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUser, get_current_user
 from app.config import get_settings
 from app.database import get_db
-from app.exceptions.base import TooManyRequestsException
+from app.exceptions.base import TooManyRequestsException, UnauthorizedException
 from app.schemas.auth import (
+    TotpEnrollConfirmRequest,
+    TotpEnrollConfirmResponse,
+    TotpEnrollStartRequest,
+    TotpEnrollStartResponse,
     CurrentUserResponse,
     LoginRequest,
     LoginResponse,
@@ -34,7 +41,8 @@ from app.schemas.auth import (
     OtpVerifyResponse,
 )
 from app.security.rate_limiter import FixedWindowRateLimiter
-from app.services import auth_service
+from app.security.jwt_handler import ENROLLMENT_TOKEN_EXPIRE_MINUTES, create_enrollment_token, decode_access_token
+from app.services import auth_service, totp_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -52,6 +60,15 @@ _login_limiter = FixedWindowRateLimiter(
     window_seconds=_settings.AUTH_LOGIN_RATE_WINDOW_SECONDS,
 )
 _otp_limiter = FixedWindowRateLimiter(
+    limit=_settings.AUTH_OTP_RATE_LIMIT,
+    window_seconds=_settings.AUTH_OTP_RATE_WINDOW_SECONDS,
+)
+# Phase 7A: enrollment endpoints get their own budgets (same limits as login / OTP verify).
+_enroll_start_limiter = FixedWindowRateLimiter(
+    limit=_settings.AUTH_LOGIN_RATE_LIMIT,
+    window_seconds=_settings.AUTH_LOGIN_RATE_WINDOW_SECONDS,
+)
+_enroll_confirm_limiter = FixedWindowRateLimiter(
     limit=_settings.AUTH_OTP_RATE_LIMIT,
     window_seconds=_settings.AUTH_OTP_RATE_WINDOW_SECONDS,
 )
@@ -125,6 +142,7 @@ def enforce_otp_rate_limit(request: Request, payload: OtpVerifyRequest) -> None:
     "/login",
     response_model=LoginResponse,
     status_code=status.HTTP_200_OK,
+    response_model_exclude_none=True,
     dependencies=[Depends(enforce_login_rate_limit)],
 )
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
@@ -181,3 +199,75 @@ def get_me(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser
         role=current_user.role_name,
         centre_id=str(current_user.centre_id) if current_user.centre_id else None,
     )
+
+
+def enforce_enroll_start_rate_limit(request: Request, payload: TotpEnrollStartRequest) -> None:
+    """Phase 7A. Key = client IP + normalized username; runs before any DB lookup."""
+    key = f"{_client_ip(request)}:{payload.username.strip().lower()}"
+    if not _enroll_start_limiter.allow(key):
+        raise TooManyRequestsException(retry_after_seconds=_enroll_start_limiter.retry_after_seconds(key))
+
+
+def enforce_enroll_confirm_rate_limit(request: Request, payload: TotpEnrollConfirmRequest) -> None:
+    """Phase 7A. Key = client IP + hash of the enrollment token (never the token itself)."""
+    key = f"{_client_ip(request)}:{_otp_challenge_identity(payload.enrollment_token)}"
+    if not _enroll_confirm_limiter.allow(key):
+        raise TooManyRequestsException(retry_after_seconds=_enroll_confirm_limiter.retry_after_seconds(key))
+
+
+@router.post(
+    "/totp/enroll/start",
+    response_model=TotpEnrollStartResponse,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(enforce_enroll_start_rate_limit)],
+    summary="Start authenticator enrollment (password + one-time enrollment code)",
+    responses={
+        401: {"description": "Invalid username, password or enrollment code (one generic message for every cause)."},
+        429: {"description": "Rate limited."},
+        503: {"description": "TOTP security configuration unavailable."},
+    },
+)
+def totp_enroll_start(payload: TotpEnrollStartRequest, db: Session = Depends(get_db)) -> TotpEnrollStartResponse:
+    """
+    Phase 7A. Public (no JWT exists yet) but gated by password AND a one-time
+    enrollment code issued by an Admin or the server operator. Returns the
+    TOTP secret / QR exactly once; it is stored only encrypted and is never
+    returned again. The authenticator is NOT active until
+    /auth/totp/enroll/confirm succeeds.
+    """
+    started = totp_service.start_enrollment(db, payload.username, payload.password, payload.enrollment_code)
+    return TotpEnrollStartResponse(
+        enrollment_token=create_enrollment_token(started.user_id),
+        provisioning_uri=started.provisioning_uri,
+        secret=started.secret_b32,
+        qr_svg_data_uri=started.qr_svg_data_uri,
+        expires_in_seconds=ENROLLMENT_TOKEN_EXPIRE_MINUTES * 60,
+    )
+
+
+@router.post(
+    "/totp/enroll/confirm",
+    response_model=TotpEnrollConfirmResponse,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(enforce_enroll_confirm_rate_limit)],
+    summary="Confirm authenticator enrollment with a code from the app",
+    responses={
+        401: {"description": "Invalid/expired enrollment token or wrong code."},
+        429: {"description": "Rate limited."},
+    },
+)
+def totp_enroll_confirm(payload: TotpEnrollConfirmRequest, db: Session = Depends(get_db)) -> TotpEnrollConfirmResponse:
+    """
+    Phase 7A. Accepts ONLY an enrollment token (purpose "totp_enroll"); a
+    session or pre-auth token is rejected. Activates the authenticator when
+    the submitted code is valid. Issues NO session: the user then signs in
+    normally (password, then a fresh authenticator code).
+    """
+    try:
+        claims = decode_access_token(payload.enrollment_token)
+    except pyjwt.PyJWTError:
+        raise UnauthorizedException("Invalid or expired enrollment token.")
+    if claims.get("purpose") != "totp_enroll":
+        raise UnauthorizedException("Invalid or expired enrollment token.")
+    totp_service.confirm_enrollment(db, uuid.UUID(claims["sub"]), payload.otp_code)
+    return TotpEnrollConfirmResponse(enrolled=True)

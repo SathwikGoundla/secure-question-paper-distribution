@@ -18,7 +18,27 @@ from abc import ABC, abstractmethod
 
 from passlib.context import CryptContext
 
+from app.config import get_settings
+
 logger = logging.getLogger(__name__)
+
+
+class OTPDeliveryError(Exception):
+    """
+    Raised when no permitted OTP delivery channel is available. The message
+    is deliberately generic and never contains the OTP (it may be logged).
+    """
+
+
+def dev_otp_logging_permitted() -> bool:
+    """
+    Phase 6I. The ONLY condition under which an OTP may be written to a log:
+    APP_ENV is exactly "development" (case-insensitive) AND the operator has
+    explicitly set OTP_DEV_LOG_ENABLED=true. Fails closed: staging,
+    production, "test", a typo, or an unset flag all return False.
+    """
+    settings = get_settings()
+    return settings.APP_ENV.strip().lower() == "development" and bool(settings.OTP_DEV_LOG_ENABLED)
 
 _otp_hash_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -49,11 +69,20 @@ class OTPProvider(ABC):
 class DevConsoleOTPProvider(OTPProvider):
     """
     Development-only stand-in. Logs the OTP instead of sending it.
-    NOT an approved delivery channel — replace before any real use
+    NOT an approved delivery channel — replace before any non-local use
     (LLD DD-12 remains open).
+
+    Phase 6I: gated. deliver() logs the OTP only when
+    dev_otp_logging_permitted() is true (APP_ENV=development AND
+    OTP_DEV_LOG_ENABLED=true). Otherwise it logs nothing about the OTP and
+    raises OTPDeliveryError, so the login fails safely instead of silently
+    "delivering" nowhere or leaking the code. No real email/SMS/authenticator
+    channel exists in this codebase.
     """
 
     def deliver(self, user_identifier: str, otp: str) -> None:
+        if not dev_otp_logging_permitted():
+            raise OTPDeliveryError("No OTP delivery channel is configured for this environment.")
         logger.warning(
             "[DEV-ONLY OTP DELIVERY] user=%s otp=%s "
             "(replace with a real channel before any non-local use)",

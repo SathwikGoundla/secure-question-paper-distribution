@@ -17,6 +17,10 @@ import type {
   LoginResponse,
   OtpVerifyRequest,
   OtpVerifyResponse,
+  TotpEnrollConfirmRequest,
+  TotpEnrollConfirmResponse,
+  TotpEnrollStartRequest,
+  TotpEnrollStartResponse,
 } from "../types/auth";
 import type {
   NotImplementedResponse,
@@ -51,6 +55,27 @@ export function login(payload: LoginRequest): Promise<LoginResponse> {
 /** POST /api/v1/auth/otp/verify — second factor (OTP), issues the session JWT. */
 export function verifyOtp(payload: OtpVerifyRequest): Promise<OtpVerifyResponse> {
   return apiRequest<OtpVerifyResponse>("/auth/otp/verify", {
+    method: "POST",
+    body: payload,
+    authenticated: false,
+  });
+}
+
+/**
+ * POST /api/v1/auth/totp/enroll/start — Phase 7A. Password + one-time enrollment code (issued by an
+ * Admin or the server operator) -> TOTP secret / QR, returned exactly once.
+ */
+export function totpEnrollStart(payload: TotpEnrollStartRequest): Promise<TotpEnrollStartResponse> {
+  return apiRequest<TotpEnrollStartResponse>("/auth/totp/enroll/start", {
+    method: "POST",
+    body: payload,
+    authenticated: false,
+  });
+}
+
+/** POST /api/v1/auth/totp/enroll/confirm — Phase 7A. A valid code from the app activates the authenticator. */
+export function totpEnrollConfirm(payload: TotpEnrollConfirmRequest): Promise<TotpEnrollConfirmResponse> {
+  return apiRequest<TotpEnrollConfirmResponse>("/auth/totp/enroll/confirm", {
     method: "POST",
     body: payload,
     authenticated: false,

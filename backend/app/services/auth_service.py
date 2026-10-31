@@ -12,6 +12,8 @@ app/services/audit_service.py unchanged in behaviour — this module now
 simply calls the shared functions instead of keeping private copies.
 """
 
+import logging
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -19,16 +21,19 @@ import jwt as pyjwt
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.exceptions.base import UnauthorizedException
+from app.exceptions.base import ForbiddenException, ServiceUnavailableException, UnauthorizedException
 from app.models.auth_session import AuthSession
 from app.models.otp_code import OtpCode
 from app.models.user import User
 from app.schemas.auth import LoginResponse, OtpVerifyResponse
 from app.security.jwt_handler import create_access_token, create_pre_auth_token, decode_access_token
-from app.security.otp import DevConsoleOTPProvider, generate_otp, hash_otp, verify_otp
+from app.security.otp import DevConsoleOTPProvider, OTPDeliveryError, generate_otp, hash_otp, verify_otp
 from app.security.password import verify_password
+from app.services import totp_service
 from app.services.audit_service import record_audit_event as _record_audit_event
 from app.services.audit_service import record_security_event as _record_security_event
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -53,6 +58,9 @@ def login_step1(db: Session, username: str, password: str) -> LoginResponse:
         _record_security_event(db, "FAILED_LOGIN", actor_id=user.user_id if user else None)
         raise UnauthorizedException("Invalid username or password.")
 
+    if get_settings().AUTH_SECOND_FACTOR == "totp":
+        return _login_step1_totp(db, user)
+
     # FR-002: generate a cryptographically secure, single-use, expiring OTP.
     otp_value = generate_otp()
     otp_row = OtpCode(
@@ -67,12 +75,63 @@ def login_step1(db: Session, username: str, password: str) -> LoginResponse:
     # Dev-only delivery (LLD DD-12 remains open) — never logs the OTP at
     # a level that would appear in a production-style log stream; the
     # provider itself is explicitly labelled dev-only (see security/otp.py).
-    _otp_provider.deliver(user.username, otp_value)
+    try:
+        _otp_provider.deliver(user.username, otp_value)
+    except OTPDeliveryError:
+        # Phase 6I: no permitted delivery channel (anything but an explicitly
+        # opted-in development environment). Invalidate the just-created
+        # challenge so it cannot be used, issue NO pre-auth token, and return
+        # a generic error. Neither the OTP nor the reason string is logged.
+        otp_row.is_used = True
+        db.commit()
+        logger.error("OTP delivery is not available in this environment; sign-in refused.")
+        raise ServiceUnavailableException("Sign-in is temporarily unavailable. Please contact the administrator.")
 
     _record_audit_event(db, "LOGIN_STEP1_SUCCESS", actor_id=user.user_id, outcome="SUCCESS")
 
     pre_auth_token = create_pre_auth_token(user.user_id)
     return LoginResponse(otp_required=True, pre_auth_token=pre_auth_token)
+
+
+def _login_step1_totp(db: Session, user: User) -> LoginResponse:
+    """
+    Phase 7A (AUTH_SECOND_FACTOR=totp). The password has ALREADY been verified.
+    Nothing is "delivered": the user's authenticator app computes the code.
+
+    * Unusable TOTP security configuration -> generic 503 (nothing issued).
+    * Account has no ACTIVE authenticator -> 403 with enrollment guidance and
+      NO challenge / pre-auth token. (This reveals "valid password, not yet
+      enrolled" only to someone who already knows the password; the
+      alternative, a generic 401, would leave legitimate users unable to
+      tell why they cannot sign in.)
+    * Otherwise create the same challenge row the legacy flow uses so expiry,
+      single use and the per-challenge attempt limit apply unchanged. Its
+      otp_hash is a hash of random bytes that nobody knows (the real code is
+      checked against the TOTP secret, never against this value).
+    """
+    totp_service.require_configured()
+    if totp_service.get_active(db, user.user_id) is None:
+        _record_security_event(db, "LOGIN_BLOCKED_NOT_ENROLLED", actor_id=user.user_id, severity="LOW")
+        raise ForbiddenException(
+            "Authenticator setup is required for this account. Ask your administrator for an "
+            "enrollment code, then use 'Set up authenticator'."
+        )
+
+    db.add(
+        OtpCode(
+            user_id=user.user_id,
+            otp_hash=hash_otp(secrets.token_urlsafe(32)),
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=get_settings().OTP_EXPIRE_SECONDS),
+            is_used=False,
+        )
+    )
+    db.commit()
+    _record_audit_event(db, "LOGIN_STEP1_SUCCESS", actor_id=user.user_id, outcome="SUCCESS")
+    return LoginResponse(
+        otp_required=True,
+        pre_auth_token=create_pre_auth_token(user.user_id, mfa="totp"),
+        second_factor="totp",
+    )
 
 
 def verify_otp_step2(db: Session, pre_auth_token: str, otp_code: str) -> OtpVerifyResponse:
@@ -132,6 +191,15 @@ def verify_otp_step2(db: Session, pre_auth_token: str, otp_code: str) -> OtpVeri
         # A full session JWT (or any other token) must never be usable here.
         raise UnauthorizedException("Invalid token type for OTP verification.")
 
+    # Phase 7A: the challenge's second-factor method is a SIGNED claim. A token
+    # issued for one method is never accepted while another is configured (so a
+    # leftover development challenge is dead the moment production uses TOTP).
+    mfa = claims.get("mfa", "dev_console")
+    if mfa != get_settings().AUTH_SECOND_FACTOR:
+        raise UnauthorizedException("Invalid or expired pre-authentication token.")
+    if mfa == "totp":
+        totp_service.require_configured()
+
     user_id = uuid.UUID(claims["sub"])
     user = db.get(User, user_id)
     if user is None or not user.is_active:
@@ -156,11 +224,18 @@ def verify_otp_step2(db: Session, pre_auth_token: str, otp_code: str) -> OtpVeri
         _record_security_event(db, "INVALID_OTP", actor_id=user_id)
         raise UnauthorizedException("Invalid or expired OTP.")
 
-    otp_valid = (
-        otp_row is not None
-        and otp_row.expires_at > now
-        and verify_otp(otp_code, otp_row.otp_hash)
-    )
+    replayed = False
+    if otp_row is None or otp_row.expires_at <= now:
+        otp_valid = False
+    elif mfa == "totp":
+        # Phase 7A: verify against the user's TOTP secret (constant-time, bounded
+        # window, replay-protected). On "ok" the accepted step is recorded in the
+        # same transaction that marks this challenge used (single commit below).
+        result = totp_service.verify_login_code(db, user_id, otp_code)
+        otp_valid = result == "ok"
+        replayed = result == "replay"
+    else:
+        otp_valid = verify_otp(otp_code, otp_row.otp_hash)
 
     if not otp_valid:
         if otp_row is not None:
@@ -174,6 +249,8 @@ def verify_otp_step2(db: Session, pre_auth_token: str, otp_code: str) -> OtpVeri
             if just_locked:
                 _record_security_event(db, "OTP_CHALLENGE_LOCKED", actor_id=user_id, severity="HIGH")
         _record_security_event(db, "INVALID_OTP", actor_id=user_id)
+        if replayed:
+            _record_security_event(db, "TOTP_REPLAY_REJECTED", actor_id=user_id, severity="HIGH")
         raise UnauthorizedException("Invalid or expired OTP.")
 
     # FR-002: single-use enforcement.

@@ -1,78 +1,47 @@
 # Review Demo Guide
 
-## Project
+Describes what can be demonstrated from the **current** code (Phase 7A) and what must not be claimed. Verify anything here against the source if in doubt.
 
-**BLOCKCHAIN-ENABLED SECURE QUESTION PAPER DISTRIBUTION FRAMEWORK WITH TIME-LOCKED ACCESS**
+## Setup (local)
 
-## What is safe to demonstrate from the supplied current code
-
-### 1. Backend startup
+See the root `README.md` quick start. You need PostgreSQL, an authenticator app on a phone (or any RFC 6238 tool), and a backend `.env` with `DATABASE_URL`, `JWT_SECRET_KEY`, `QUESTION_PAPER_MASTER_KEY` and a *different* `TOTP_ENCRYPTION_KEY`.
 
 ```bash
-cd backend
-pip install -r requirements.txt
-```
-
-Configure `backend/.env` from `.env.example`, then:
-
-```bash
+cd backend && python -m scripts.init_db
+python -m scripts.create_user --username admin1 --password '<password>' --role Admin
+python -m scripts.totp_enroll_code --username admin1   # prints a one-time enrollment code
 uvicorn app.main:app --reload
+cd ../frontend && npm run dev            # http://localhost:3000
 ```
 
-Open:
+## Suggested demonstration
 
-```text
-http://127.0.0.1:8000/docs
-```
+1. **Enroll and log in:** open `/enroll`, enter username, password and the enrollment code, scan the QR, confirm with the app's code. Then sign in: username/password, then a fresh 6-digit code, then the Admin portal. (Codes are single-use per 30-second step; wait for the next code if you just enrolled.)
+2. **Create an examination centre** (Admin portal) and a centre login with `scripts.create_user --role "Examination Centre" --centre-id <id>`.
+3. **Register a paper** with a release time a few minutes ahead. Point out: ciphertext only on disk, SHA-256 recorded.
+4. **Authorize the centre.** In the centre portal the paper shows registration status `registered` and release state `Locked`; retrieval is refused (403 "not yet available") and logged.
+5. **Reschedule** while locked and open the **schedule history** (old/new times, who, when).
+6. **After the release time** the centre retrieves the PDF. Show the audit log (`PAPER_RELEASED`), the evidence it was actually opened. `lock_status = released` alone proves nothing about access.
+7. **Authorization boundary:** a second centre requesting the paper, or a random id, gets the identical "not found". **Revoke** the first centre and retrieve again: same result.
+8. **Tamper detection (optional, with a prepared copy):** altering the stored ciphertext makes retrieval fail integrity verification (409); it is never released.
+9. **Security events:** failed logins and OTP lockouts appear for Admin/Auditor.
+10. **Lost phone:** an Admin issues a new enrollment code for the user (`POST /admin/totp/enrollment-codes`); the old authenticator and sessions stop working immediately; the user re-enrolls at `/enroll`.
 
-### 2. Database initialization
+## What you may claim
 
-After configuring PostgreSQL:
+AES-256-GCM per-paper encryption; SHA-256 integrity; server-side time lock with logged denials; role-based and per-paper authorization with revocation; audit and security-event trail; rate limiting, OTP attempt limiting and security headers; restricted CORS.
 
-```bash
-cd backend
-python -m scripts.init_db
-```
+## What you must not claim
 
-### 3. Authentication demonstration
+- Email/SMS OTP (not implemented; the second factor is an authenticator app). Do not claim TOTP is phishing-resistant.
+- That Hyperledger Fabric is required or fully integrated. The default is an in-memory stub; with Fabric only four chaincode operations are supported.
+- That centre authorization or revocation is recorded on the blockchain (it is in PostgreSQL).
+- Exam-session security, evaluation or feedback modules, cloud storage.
+- That this is production-ready, "better" or "first". `PROJECT_STATE.md` lists open issues.
 
-Provision a development user using the supplied CLI:
+## Likely follow-up questions
 
-```bash
-python -m scripts.create_user --username admin1 --password "Str0ng!Pass" --role Admin
-```
-
-Then demonstrate:
-
-1. Username/password login
-2. OTP verification
-3. JWT issuance
-4. `/auth/me`
-5. Logout
-6. Protected endpoint access / RBAC
-
-The OTP delivery in this snapshot is development-only and is exposed through the configured development provider/logging path.
-
-### 4. What the paper APIs currently demonstrate
-
-The paper/admin/audit/exam-session routes have RBAC protection, but their business logic intentionally returns `501 Not Implemented` in this snapshot.
-
-Do not present these as completed paper-distribution features.
-
-## Suggested faculty explanation
-
-> “The current implementation checkpoint establishes the secure backend foundation first. Authentication, OTP, JWT session control, RBAC, database models, audit/security event structures, storage abstraction, and blockchain service abstraction are implemented. The subsequent implementation phases will connect the cryptographic paper pipeline, real Hyperledger Fabric network, time-lock release, and frontend.”
-
-## Important distinction
-
-The project architecture includes AES-256, SHA-256, Hyperledger Fabric and time-locked access as target capabilities. The supplied code snapshot does not contain the later cryptographic service or real Fabric network implementation.
-
-Do not claim that those later components are already operational during this review if they are not present in the source.
-
-## Quick checks
-
-```bash
-python -m compileall backend
-```
-
-For the historical Phase 2 manual suite, the project documentation records 28/28 passing tests against the original real PostgreSQL + uvicorn setup. Re-run it in the actual development environment before presenting a fresh test count.
+- *Why not store the paper on the blockchain?* Large and confidential; only hashes/audit metadata go on-chain.
+- *Who decides release time?* The backend clock; the browser clock is never trusted.
+- *Why does an unauthorized centre see "not found"?* So it cannot discover which paper ids exist.
+- *Is the code sent by email/SMS?* No. It is a TOTP computed by the user's authenticator app; recovery is an Admin/operator-issued one-time enrollment code.

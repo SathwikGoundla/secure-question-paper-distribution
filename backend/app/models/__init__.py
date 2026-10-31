@@ -28,6 +28,7 @@ from app.models.otp_code import OtpCode  # noqa: F401
 from app.models.auth_session import AuthSession  # noqa: F401
 from app.models.exam_security_event import ExamSecurityEvent  # noqa: F401
 from app.models.paper_schedule_history import PaperScheduleHistory  # noqa: F401
+from app.models.user_totp import UserTotp  # noqa: F401
 
 __all__ = [
     "Role",
@@ -41,4 +42,5 @@ __all__ = [
     "AuthSession",
     "ExamSecurityEvent",
     "PaperScheduleHistory",
+    "UserTotp",
 ]

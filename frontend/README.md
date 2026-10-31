@@ -1,13 +1,26 @@
-# Frontend — Phase 6A (Foundation Only)
+# Frontend
 
 React + TypeScript + Vite frontend for the Blockchain-Enabled Secure
-Question Paper Distribution Framework.
+Question Paper Distribution Framework. (Originally scoped as the "Phase 6A
+foundation"; the portals below were added in Phases 6B, 6C, 6D, 6F, 6G and
+6H. `../PROJECT_STATE.md` has the history.)
 
-**Scope of this phase:** authentication foundation (login + OTP),
-routing skeleton with protected routes, and placeholder pages for the
-Admin Portal and Examination Centre Portal. The Admin Portal, Exam
-Centre Portal, dashboards, analytics, and any blockchain-facing UI are
-**not** implemented yet — see `PROJECT_STATE.md` §Phase 6A.
+**What is implemented (see `src/routes/`):**
+
+- Login and verification-code entry (authenticator app) with protected, role-based routing, and an **authenticator enrollment page** (`/enroll`: username + password + one-time enrollment code, QR / setup key shown once, confirm with a code, then sign in). Phase 7A.
+- **Admin portal** (`/admin`): dashboard, papers list (registration status
+  and server-computed release state shown separately), paper upload, paper
+  detail (authorize/revoke centres, reschedule while locked, release
+  schedule history), examination centres, audit logs, security events.
+- **Examination Centre portal** (`/exam-centre`): authorized papers with the
+  server-reported release state, paper detail/status, and retrieval of a
+  released paper.
+
+**Not implemented:** examination-session security UI, evaluation and
+feedback screens, analytics. Release state is always taken from the backend
+(`lock_status`); the browser clock is used only for an informational
+countdown and never decides access. A centre that requests a paper it may
+not access sees the same generic "not found" as for an unknown paper.
 
 ## Prerequisites
 

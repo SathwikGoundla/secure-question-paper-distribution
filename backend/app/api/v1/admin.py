@@ -30,7 +30,8 @@ from app.schemas.admin import (
     CentreUpdateRequest,
     DashboardSummaryResponse,
 )
-from app.services import centre_service, dashboard_service
+from app.schemas.auth import AdminEnrollmentCodeRequest, AdminEnrollmentCodeResponse
+from app.services import centre_service, dashboard_service, totp_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -124,3 +125,30 @@ def dashboard_summary(db: Session = Depends(get_db)) -> DashboardSummaryResponse
 def exam_security_events() -> dict:
     """LLD API-15 (Faculty-Review Addition). Out of Phase 6C's scope — untouched."""
     return {"detail": "Not implemented yet — planned for the examination-session-security implementation phase."}
+
+
+@router.post(
+    "/totp/enrollment-codes",
+    response_model=AdminEnrollmentCodeResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Issue a one-time authenticator enrollment code for another user (Admin only)",
+    responses={
+        401: {"description": "Not authenticated."},
+        403: {"description": "Not an Admin, or the target is the caller (use the server CLI)."},
+        404: {"description": "Unknown or inactive user."},
+    },
+)
+def issue_totp_enrollment_code(
+    body: AdminEnrollmentCodeRequest,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(require_role("Admin")),
+) -> AdminEnrollmentCodeResponse:
+    """
+    Phase 7A account-recovery / provisioning. Wipes the target's existing
+    authenticator immediately, revokes the target's active sessions, and
+    returns a new single-use enrollment code (shown once; hand it to the user
+    out-of-band). Audited as TOTP_ENROLLMENT_CODE_ISSUED. The code is never
+    logged. An Admin cannot reset their own authenticator through the API.
+    """
+    target, code, expires_at = totp_service.admin_issue_enrollment_code(db, current_user, body.username)
+    return AdminEnrollmentCodeResponse(username=target.username, enrollment_code=code, expires_at=expires_at)

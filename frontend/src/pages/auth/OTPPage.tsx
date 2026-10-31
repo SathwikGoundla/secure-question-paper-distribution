@@ -49,7 +49,7 @@ export function OTPPage() {
       <div className="auth-card">
         <h1>Enter verification code</h1>
         <p className="auth-subtitle">
-          Enter the one-time passcode (OTP) to complete sign-in.
+          Enter the 6-digit code from your authenticator app to complete sign-in.
         </p>
 
         <form onSubmit={handleSubmit} noValidate>

@@ -3,14 +3,14 @@
 **Project:** Blockchain-Enabled Secure Question Paper Distribution Framework with Time-Locked Access and Tamper Detection
 **This file is the permanent continuity record for this project.** At the start of every future task: read this file, then verify it against the actual source code (not the other way around) — if this file and the code disagree, the code is correct and this file must be updated to match.
 
-Last updated: **Phase 6D (Examination Centre portal completion) — implemented and tested this session.** *(Phase 6C discrepancy fix: this line previously still read "Phase 5C" and the Section 3 table below listed Phase 6B as NOT STARTED, although Phases 5D–6B were complete per their own sections and the Git history. Corrected; no source code was affected.)*
+Last updated: **Phase 7A (real TOTP authenticator-app second factor, enrollment and recovery) — see Section 27.** Latest COMPLETED phase: **7A** (6I, Section 26, immediately before it). Verified phase chain: 6E (sections 20–22), 6F (23), 6G (24), 6H (25), 6I (26). *(Correction recorded in Phase 6I: this line, the Section 1 diagram, the Section 2 stack line and the Section 3 table had not been updated since Phase 6D and wrongly implied the frontend did not exist and that Phase 6E had not started. Earlier text in this file is preserved as historical record; where an older section contradicts Section 26 or the source code, the source code is correct.)* *Previous status line, kept for history:* **Phase 6D (Examination Centre portal completion) — implemented and tested this session.** *(Phase 6C discrepancy fix: this line previously still read "Phase 5C" and the Section 3 table below listed Phase 6B as NOT STARTED, although Phases 5D–6B were complete per their own sections and the Git history. Corrected; no source code was affected.)*
 
 ---
 
-## 1. Architecture (unchanged from Phase 1/2)
+## 1. Architecture (updated in Phase 6I to match the code; originally Phase 1/2)
 
 ```
-React Frontend (not yet built)
+React Frontend (React + TypeScript + Vite; Admin portal and Examination Centre portal, Phases 6A-6H)
         |
         v  HTTPS
 FastAPI Backend  --------------------------------------------
@@ -26,17 +26,21 @@ PostgreSQL (users, roles, exam_centres, papers, paper_authorizations,
         |  HTTP (FabricBlockchainService only)
    Fabric Gateway Adapter (Node.js, Phase 5B, localhost:8081)
         |  gRPC
-   Hyperledger Fabric  <-- real network exists (Phase 5A); only
-                            record_audit_event is actually called by the
-                            app today (Section 10/13) — StubBlockchainService
-                            remains the default backend for local/unit tests
+   Hyperledger Fabric  <-- optional. Chaincode supports 4 operations only:
+                            RegisterPaper, GetPaper, VerifyPaperHash, RecordAuditEvent.
+                            The app uses them at paper registration, retrieval-time
+                            hash verification and audit forwarding (Phases 5D/5E).
+                            Six other ledger operations are unsupported on Fabric.
+                            StubBlockchainService (in-memory) is the default and is
+                            what the automated tests use. A live network was verified
+                            in earlier phases per this file; NOT re-run in Phase 6I.
         |
    Local filesystem storage (./storage_data)  <-- dev-only, LLD DD-13 open
 ```
 
-## 2. Technology stack (unchanged)
+## 2. Technology stack (updated in Phase 6I)
 
-React.js (frontend, **not yet present in this repo**), Python FastAPI, PostgreSQL + SQLAlchemy, Hyperledger Fabric (stubbed), AES-256-GCM (`cryptography` lib), SHA-256, JWT (PyJWT), OTP (bcrypt-hashed via passlib), bcrypt password hashing.
+React + TypeScript + Vite (frontend, present since Phase 6A), Python FastAPI, PostgreSQL + SQLAlchemy, Hyperledger Fabric (optional; stub by default), AES-256-GCM (`cryptography` lib), SHA-256, JWT (PyJWT), OTP (bcrypt-hashed via passlib), bcrypt password hashing.
 
 ## 3. Phase status
 
@@ -55,7 +59,14 @@ React.js (frontend, **not yet present in this repo**), Python FastAPI, PostgreSQ
 | Phase 6B — Admin Portal | COMPLETE (see Section 17) |
 | **Phase 6C — Admin backend completion** | **COMPLETE this session** (see Section 18) |
 | **Phase 6D — Examination Centre portal completion** | **COMPLETE this session** (see Section 19) |
-| Phase 6E | NOT STARTED |
+| Phase 6E-1 — OTP attempt limiting | COMPLETE (Section 20) |
+| Phase 6E-2 — Security headers and rate limiting | COMPLETE (Section 21) |
+| Phase 6E-3 — IDOR and secret-leakage regression tests | COMPLETE (Section 22) |
+| Phase 6F — Examination-centre authorization revocation | COMPLETE (Section 23) |
+| Phase 6G — Release scheduling and lock status | COMPLETE (Section 24) |
+| Phase 6H — Lifecycle consistency and schedule history | COMPLETE (Section 25) |
+| Phase 6I — Security hardening and documentation reconciliation | COMPLETE — see Section 26 |
+| **Phase 7A — Real TOTP second factor, secure enrollment, recovery** | **COMPLETE AND VERIFIED — see Section 27 for exactly what was and was not verified** |
 | Phase 7 — Evaluation / feedback modules | NOT STARTED |
 
 ## 4. Known documentation-vs-code gap (pre-existing, not introduced this session)
@@ -2632,3 +2643,152 @@ Local commit message: `Phase 6H checkpoint: consistent paper lifecycle and sched
 
 ## 25.12 Recommended next phase
 **Phase 6I — close the carried-over security findings:** gate/redact the dev OTP provider's plaintext logging, tighten CORS methods/headers, and decide the 403-vs-404 disclosure policy, each with tests and mutation checks. Rationale: these three are the only known, previously reported security items still open, and all are small and independent; fixing them before further features (e.g. an authorizations-listing endpoint, or a "retrieval history" view built on `PAPER_RELEASED`) keeps the feature work from building on known weaknesses.
+
+
+---
+
+# 26. Phase 6I — Security hardening, regression testing and documentation reconciliation
+
+Source code is authoritative. This phase closes the three security findings carried since Phase 6E–6H, and reconciles documentation that had drifted. **No Git commit and no push were made** (not requested). Evidence below is limited to what was executed in this session.
+
+## 26.1 Environment note (honest)
+The working sandbox was reset during this phase. Application code and tests were re-applied from the Phase 6H ZIP (HEAD `ffca0a8`); the documentation edits made before the reset had been lost and were rewritten afterwards. All results below were produced after the rebuild, on the final tree. The frontend and the Fabric components were not changed. Several test runs were killed by sandbox/PostgreSQL restarts and were discarded (see 26.7); only completed runs are reported.
+
+## 26.2 Baseline (Phase 6H code, pristine export of `ffca0a8`)
+- Backend SQLite: **328 passed, 1 skipped** (the PostgreSQL-only row-lock test). Backend PostgreSQL 16.15 (fresh empty DB): **329 passed**. Identical to the Phase 6H record.
+- Excluded in all runs: `tests/test_phase2_manual.py` (needs a live server; errors at collection under plain `pytest` because no pytest config excludes it).
+- Fabric scripts: the six `blockchain/network/scripts/*.sh` files are `100755` in the commit, on disk after extraction and in the Phase 6H ZIP (`0755`), with **no content or mode diff** here. Any difference on another machine is environmental (typically a filesystem that drops the executable bit). Nothing was reset or changed. Guidance: inspect with `git diff --summary`; fix with `chmod +x` / `git update-index --chmod=+x`, or `git config core.fileMode false` on such filesystems; do not commit mode changes unintentionally.
+- Documentation drift found: root `README.md` (Phase 1–2 era: "Phase 3+ not started", wrong layout), `backend/README.md` (papers endpoints "501"), `docs/REVIEW_CHECKPOINT_CURRENT.md` / `REVIEW_DEMO_GUIDE.md` (Phase 2 snapshot), top of this file (still "latest = 6D", "frontend not yet built", "6E NOT STARTED"). The suite also never drops tables, so re-using a PostgreSQL database causes spurious conflict failures (this caused 9 false failures in a Phase 6H intermediate run).
+
+## 26.3 Objective A — development OTP delivery
+- **Problem:** `DevConsoleOTPProvider` logged the plaintext OTP unconditionally and was the only provider.
+- **Change:** new setting `OTP_DEV_LOG_ENABLED` (default `false`). `app/security/otp.py::dev_otp_logging_permitted()` is true only when `APP_ENV` is exactly `development` (case/space-insensitive) **and** the flag is true; every other value fails closed. `DevConsoleOTPProvider.deliver()` otherwise logs nothing and raises `OTPDeliveryError`. `auth_service.login_step1` catches it, marks the just-created OTP challenge used, issues **no** pre-auth token, logs one OTP-free error line, and returns **HTTP 503** `"Sign-in is temporarily unavailable. Please contact the administrator."` A startup warning is logged if the flag is set outside development.
+- **Consequence (intended):** outside development, login is impossible until a real delivery channel is implemented. **No real OTP channel exists** (SRS OQ-4 / LLD DD-12 still open) and none is claimed. Existing local `.env` files without `OTP_DEV_LOG_ENABLED=true` now get the 503 locally; `.env.example` documents this.
+- Unchanged and re-tested: password → OTP → JWT order, OTP expiry, single use, attempt lock, rate limits, session revocation, hashed OTP at rest.
+- Test environment: `tests/conftest.py` sets `APP_ENV=development` and `OTP_DEV_LOG_ENABLED=true` (a developer-style opt-in) so the existing suite can read OTPs.
+
+## 26.4 Objective B — CORS
+- **Derived from code:** the routes define only GET/POST/PATCH; `frontend/src/api/client.ts` sends `Accept`, `Authorization`, `Content-Type`, uses a Bearer token and never `credentials: "include"`.
+- **Change (`app/main.py`):** `allow_methods=["GET","POST","PATCH"]`, `allow_headers=["Accept","Authorization","Content-Type"]`, `allow_credentials=False` (was `True`; credentials are unnecessary for Bearer auth), origins still from `CORS_ORIGINS`. A `"*"` origin is now rejected at startup by a settings validator (no permissive fallback). Frontend behaviour was not modified.
+- **Limits:** CORS is enforced by browsers; the tests exercise Starlette's real middleware via the test client (preflight and actual requests) but cannot reproduce a browser or a reverse proxy that rewrites headers.
+
+## 26.5 Objective C — paper-existence disclosure policy
+- **Policy:** for an Examination Centre on `GET /papers/{id}`, `/status` and `/retrieve`, an unknown paper, an existing paper it is not authorized for, and one whose authorization was revoked all return the **same** `404 "The requested resource was not found."` (same status, headers and body); nothing about the paper is returned. Implemented once in `paper_service._get_paper_for_centre_or_404`; authorization is still enforced first, and for existing-but-denied papers the `UNAUTHORIZED_ACCESS` security event (and for retrieval the `DENIED` audit event) are still recorded. An authorized centre on a locked paper still gets `403 "not yet available"` (it may know the paper exists). Admin behaviour, 401 for unauthenticated requests, and 422 for malformed ids are unchanged; Admin-only routes return role-based 403 before any lookup (no oracle). No blanket exception handling was added (a test proves a server error stays a 500).
+- **API change:** 403 → 404 for the unauthorized/revoked-centre case on those three routes. Eleven existing assertions encoding the old 403 were updated deliberately (`test_idor_cross_centre`, `test_paper_authorization_revocation`, `test_time_lock`, `test_paper_api`, `test_paper_release_scheduling`) and their docstrings corrected; the last two were found only by the complete-suite run, not by the targeted subset.
+- **Residual (not fixed):** the denied path does extra audit/security writes, so response timing could in principle differ from the unknown-paper path.
+
+## 26.6 Files
+- **Created:** `backend/tests/test_otp_delivery_security.py` (23 tests), `backend/tests/test_cors_policy.py` (35), `backend/tests/test_paper_existence_disclosure.py` (26).
+- **Modified (code):** `backend/app/config.py`, `app/main.py`, `app/security/otp.py`, `app/services/auth_service.py`, `app/services/paper_service.py`.
+- **Modified (tests):** `tests/conftest.py` (development opt-in), and the old-403 assertions in `test_idor_cross_centre.py`, `test_paper_authorization_revocation.py`, `test_time_lock.py`, `test_paper_api.py`, `test_paper_release_scheduling.py`; `test_secret_leakage.py` (docstring only).
+- **Modified (docs/config):** `backend/.env.example`, `README.md`, `backend/README.md`, `frontend/README.md`, `docs/REVIEW_CHECKPOINT_CURRENT.md`, `docs/REVIEW_DEMO_GUIDE.md`, `docs/PHASE1_IMPLEMENTATION_STATUS.md` and `docs/PHASE2_IMPLEMENTATION_STATUS.md` (historical banners only), `PROJECT_STATE.md`.
+- **Configuration changes:** new `OTP_DEV_LOG_ENABLED` (default false). `CORS_ORIGINS` now rejects `*`. No database/schema change, no new dependency.
+
+## 26.7 Verification results
+| Check | Result (executed this session) |
+|---|---|
+| Baseline, pristine Phase 6H, SQLite | **328 passed, 1 skipped** (778 s) |
+| Baseline, pristine Phase 6H, PostgreSQL 16.15 (fresh DB) | **329 passed** (503 s) |
+| **Final, SQLite, complete suite** (19 existing files + 3 new files; 84 new tests) | **412 passed, 1 skipped, 0 failed** (561 s). The one skip is the PostgreSQL-only row-lock race test. 328 + 84 = 412. |
+| **Final, PostgreSQL 16.15, complete suite, brand-new empty database** | **413 passed, 0 skipped, 0 failed** (652 s). 329 + 84 = 413. |
+| Frontend (Vitest) | **71 passed** (9 files) |
+| TypeScript (`tsc -b`) and production build (`vite build`) | clean / built successfully |
+| Mutation checks | **18/18 detected**, re-run in this session; copy diff-verified identical to the real tree |
+| Live `uvicorn` smoke on PostgreSQL | see below |
+
+Both complete backend runs excluded only `tests/test_phase2_manual.py` (a manual script that needs a live server and errors at collection under plain `pytest`; the repository has no pytest config). The three Phase 6I test files were part of both complete runs.
+
+**Intermediate runs (not counted as evidence of the final state):** an earlier complete SQLite run on the pre-fix tree showed failures that led to three fixes: (1) `test_startup_warns_when_flag_is_set_outside_development_without_leaking` failed after `test_crypto_service` calls `get_settings.cache_clear()` (test-isolation issue; the test now patches the settings object `on_startup` actually reads); (2) and (3) `test_paper_api::test_retrieval_denied_for_unauthorized_centre` and `test_paper_release_scheduling::test_status_denied_to_unauthorized_centre` still expected the old 403. A PostgreSQL run on the same pre-fix tree showed only (2) and (3). Several other runs were killed by sandbox/PostgreSQL restarts and discarded.
+
+**Live smoke (real `uvicorn` + PostgreSQL, throw-away database; not part of the pytest suite):** development without the flag: `POST /auth/login` 503, no OTP text in the server log; production with the flag set: 503, no OTP in the log, startup warning that the flag is ignored; development with the flag: login returns a pre-auth token, wrong OTP 401, correct OTP issues a JWT, reuse of the same OTP 401; `GET /auth/me` with a Bearer token from `Origin: http://localhost:3000` returns 200 with `access-control-allow-origin` and no `access-control-allow-credentials`; a preflight for DELETE and one from `https://evil.example` both return 400. The same smoke on SQLite exposed a pre-existing limitation: the application itself cannot run on SQLite (naive/aware datetime comparison in OTP expiry); SQLite is test-only (the test harness shims it). Documented in the READMEs.
+
+**Not run / not verified:** a live Hyperledger Fabric network (unit tests use fakes/stub and do not prove a live deployment); a real browser's CORS enforcement; `tests/test_phase2_manual.py`.
+
+## 26.8 Mutation checks (re-run this session; temporary, in a separate copy; reverted; `app/` diff-verified identical to the real tree)
+All **18/18 detected**: A1 provider gate removed; A2 `APP_ENV` ignored; A3 flag ignored; A4 `OTPDeliveryError` unhandled; A5 refused challenge left usable; A6 OTP written to the error log; B1 wildcard methods; B2 wildcard headers; B3 credentials re-enabled; B4 wildcard origin; B5 wildcard validator removed; B6 PATCH dropped from the allowed methods; C1 unauthorized reverted to 403; C2 authorization check bypassed; C3 security-event recording removed; C4 denied-retrieval audit removed; C5 unknown paper given a distinguishable message; C6 blanket exception handling. (A script bug in the first C1 anchor was corrected and rerun; the failed attempt modified nothing.)
+
+## 26.9 Security status after this phase
+- **Fixed:** plaintext OTP logging outside an explicit development opt-in; wildcard CORS methods/headers and unneeded credentials; 403-vs-404 paper-existence oracle for centres.
+- **Still open / limitations:** no real OTP delivery (login is refused outside development); the development provider still logs plaintext OTPs when explicitly opted in locally; response-timing difference between the two 404 paths; CORS is not an authentication control; the Fabric chaincode supports only 4 operations and six ledger operations are unsupported; `/exam-session/violation` and `/admin/exam-security-events` still return 501; local filesystem storage only; no migration tool; no evaluation/feedback modules. No claim of zero security issues is made.
+- **Not verified in this phase:** a live Hyperledger Fabric network; a real browser's CORS enforcement; `tests/test_phase2_manual.py`. The application cannot run on SQLite (tests only).
+
+## 26.10 Git
+No commit and no push were made. The Phase 6I changes are uncommitted on top of `ffca0a8`; `git diff --check` is clean, no secret patterns or `.env` files are present, and the six Fabric scripts are still `100755` with no mode changes.
+
+## 26.11 Recommended next phase
+**Phase 7A — a real OTP delivery channel** (decide email vs authenticator-app/TOTP; implement a provider behind the existing interface, with tests), because Phase 6I made the system correctly refuse login outside development, so no non-local deployment is possible until this exists. Rationale for doing it before evaluation/feedback modules: every later phase's real-user testing depends on being able to log in without reading a server log.
+
+**Phase 6I status: COMPLETE AND VERIFIED** against the criteria above (all three fixes present; complete backend suites passing on SQLite and PostgreSQL; frontend checks passing; documentation reconciled; packaged archive `qpaper-system_PHASE_6I_COMPLETE.zip`; archive size and SHA-256 are reported in the phase report and sidecar `.sha256` file, because an archive cannot contain its own checksum).
+
+
+---
+
+# 27. Phase 7A — Real TOTP second factor, secure enrollment and recovery
+
+Source code is authoritative. Starting point: the Phase 6I tree, verified byte-identical to `qpaper-system_PHASE_6I_COMPLETE.zip` (checksum OK) before any change. **No Git commit and no push were made.**
+
+## 27.1 Decision: TOTP, not SMTP email OTP
+| Criterion | TOTP (chosen) | SMTP email OTP |
+|---|---|---|
+| Fit with existing code | The challenge row (expiry, single use, attempt limit) and signed pre-auth token are reused unchanged; only "check the code" changes. | Needs a real provider behind `OTPProvider`, a verified e-mail field on users (schema change), delivery-failure handling. |
+| Dependencies / cost | `pyotp` (RFC 6238) + `segno` (pure-Python QR); free; no external service. | SMTP credentials/provider, deliverability, possible cost. |
+| Security | No secret in transit per login; not phishing-resistant. | Code transits e-mail (interceptable mailbox); depends on mail security. |
+| Offline / exam-centre use | Works offline. | Needs mail access. |
+| Main cost | Enrollment/recovery process (designed below). | Operating the mail channel. |
+No architectural blocker to TOTP was found in the actual code, so email OTP was not implemented (no scope inflation).
+
+## 27.2 Authentication flow (`AUTH_SECOND_FACTOR=totp`, now the default)
+1. `POST /auth/login`: password verified (generic 401 on failure). Unusable TOTP configuration -> generic 503. Valid password but no ACTIVE authenticator -> 403 with enrollment guidance and **no challenge and no token**. Otherwise an `otp_codes` challenge row (hash of random unknown bytes) is created and a pre-auth token with signed claim `mfa=totp` is returned (`second_factor: "totp"`).
+2. `POST /auth/otp/verify`: the pre-auth token's `mfa` must equal the configured method (a leftover development challenge is dead in TOTP mode and vice versa). The code is checked against the user's decrypted secret within `TOTP_VALID_WINDOW`, in constant time over the whole window; **replay protection** via `user_totp.last_used_step` (accept only a strictly newer step) updated under a row lock in the same transaction that marks the challenge used. Only then the normal JWT is issued. Every failure (wrong, malformed, expired, replayed, locked, spent) returns the same generic 401.
+The pre-auth and enrollment tokens have distinct `purpose` claims and are rejected by every protected endpoint.
+
+## 27.3 Enrollment, bootstrap and recovery
+- **Why not password-only enrollment:** a stolen password of a not-yet-enrolled account would let an attacker attach their own authenticator. Enrollment therefore needs a **one-time enrollment code** (12 symbols, shown once, stored as SHA-256, expires after `TOTP_ENROLLMENT_CODE_TTL_HOURS`, destroyed after `TOTP_ENROLLMENT_MAX_ATTEMPTS` wrong tries).
+- **Bootstrap (no one can log in yet):** the server operator runs `python -m scripts.totp_enroll_code --username <user>` (needs server/database access, the system's trust root). Existing users after upgrade are handled the same way.
+- **Admin-assisted:** `POST /admin/totp/enrollment-codes` (Admin only, not for oneself, 404 for unknown users).
+- **User:** `POST /auth/totp/enroll/start` (username + password + code; rate limited; one generic 401 for every failure) returns the secret/QR **once**; the authenticator is not yet usable. `POST /auth/totp/enroll/confirm` (short-lived enrollment token only) activates it after a valid code; no session is issued.
+- **Lost authenticator:** a new code wipes the old authenticator and revokes the user's sessions immediately. Admins cannot reset themselves via the API (hijacked session protection); they use the CLI.
+- Secrets: AES-256-GCM under the dedicated `TOTP_ENCRYPTION_KEY` (must differ from the paper master key; user id as AAD); never logged, never returned after confirmation.
+
+## 27.4 Files and schema
+- **Created:** `backend/app/models/user_totp.py`, `app/security/totp.py`, `app/services/totp_service.py`, `scripts/totp_enroll_code.py`, `tests/test_totp_auth.py` (42 tests), `frontend/src/pages/auth/EnrollPage.tsx`, `EnrollPage.test.tsx` (6 tests).
+- **Modified (backend):** `requirements.txt` (+`pyotp==2.9.0`, `segno==1.6.1`), `app/config.py`, `app/models/__init__.py`, `app/security/jwt_handler.py` (`mfa` claim, enrollment token), `app/services/auth_service.py`, `app/schemas/auth.py`, `app/api/v1/auth.py`, `app/api/v1/admin.py`, `scripts/create_user.py` (reminder), `tests/conftest.py`, `.env.example`.
+- **Modified (frontend):** `types/auth.ts`, `api/endpoints.ts`, `routes/AppRoutes.tsx`, `pages/auth/LoginPage.tsx` (+test), `pages/auth/OTPPage.tsx` (copy), `index.css`.
+- **Docs:** `README.md`, `backend/README.md`, `frontend/README.md`, `docs/REVIEW_CHECKPOINT_CURRENT.md`, `docs/REVIEW_DEMO_GUIDE.md`, this file.
+- **Schema:** ONE new table `user_totp` (no existing table altered); created by `python -m scripts.init_db` (`create_all`), idempotent; existing users/roles/sessions/papers untouched. Existing users cannot sign in until an enrollment code is issued.
+
+## 27.5 API and configuration changes
+- **New:** `POST /auth/totp/enroll/start`, `POST /auth/totp/enroll/confirm`, `POST /admin/totp/enrollment-codes`.
+- **Changed:** `POST /auth/login` response gains optional `second_factor` (omitted in the legacy flow) and may now return 403 (not enrolled) or 503 (TOTP configuration unusable); pre-auth token gains a signed `mfa` claim.
+- **Config:** `AUTH_SECOND_FACTOR` (default `totp`), `TOTP_ENCRYPTION_KEY` (required for totp), `TOTP_ISSUER`, `TOTP_VALID_WINDOW` (0-2, default 1), `TOTP_ENROLLMENT_CODE_TTL_HOURS` (24), `TOTP_ENROLLMENT_MAX_ATTEMPTS` (5). The legacy development console OTP remains only under `AUTH_SECOND_FACTOR=dev_console` AND the unchanged Phase 6I gate (`APP_ENV=development` and `OTP_DEV_LOG_ENABLED=true`); it cannot be enabled in production.
+- The test suite sets `AUTH_SECOND_FACTOR=dev_console` (development context) so the pre-7A tests keep exercising the legacy flow; `test_totp_auth.py` switches to `totp` per test.
+
+## 27.6 Verification
+| Check | Result (executed this session, on the final tree) |
+|---|---|
+| Phase 6I baseline (historical, from Section 26; **not re-run**; the working tree was verified byte-identical to the 6I ZIP) | SQLite 412 passed, 1 skipped; PostgreSQL 413 passed |
+| **Backend, SQLite, complete suite** (23 files, `test_phase2_manual.py` excluded: manual live-server script) | **453 passed, 2 skipped, 0 failed** (616 s). 412 + 41 new = 453; the 2 skips are the PostgreSQL-only tests (Phase 6H row-lock race, Phase 7A concurrent-verification race). |
+| **Backend, PostgreSQL 16.15, complete suite, brand-new empty database** | **455 passed, 0 skipped, 0 failed** (626 s). 413 + 42 new = 455, including the real concurrent-verification test (4 threads, one code: exactly one session). |
+| New backend tests | 42 in `tests/test_totp_auth.py` (41 pass on SQLite, 1 PostgreSQL-only) |
+| Frontend (Vitest) | **79 passed** in 10 files (71 earlier + 6 `EnrollPage` + 2 `LoginPage`) |
+| TypeScript (`tsc -b`) / production build (`vite build`) | clean / built successfully |
+| Mutation checks (separate copy; `app/` diff-verified identical afterwards) | **15/15 detected**: replay protection removed; skew window widened; wrong code yields JWT; secret stored unencrypted; enrollment without code; authenticator active before confirmation; not-enrolled user gets a challenge; `mfa` claim not enforced; admin self-reset allowed; sessions not revoked on issuance; TOTP key may equal paper master key; secret written to the log; enrollment rate limit removed; enrollment lock-out disabled; expired challenge accepted |
+| Live smoke: real `uvicorn` + PostgreSQL + the real CLI, `APP_ENV=production`, dev flag unset | **19/19 checks passed** (not-enrolled 403; CLI code; wrong code generic 401; start returns secret/URI/QR; unconfirmed enrollment unusable; confirm; consumed code unusable; login returns pre-auth only; pre-auth token cannot call `/auth/me`; wrong code 401; correct code -> JWT -> `/auth/me`; replay 401; admin cannot self-reset; admin issues a code for another user who then enrolls; CORS preflight from the approved origin; server log free of secret/codes/dev-OTP text; missing `TOTP_ENCRYPTION_KEY` -> generic 503, no token) |
+| Upgrade check on PostgreSQL | a database built by the Phase 6I code (11 tables, 1 user, 3 roles) upgraded by the 7A `init_db` to 12 tables (`user_totp` added), user/roles untouched, re-run idempotent; CLI issues a code for the existing user |
+
+**Not run / not verified:** a live Hyperledger Fabric network; a real browser; interoperability with a specific phone authenticator app (codes in tests and smoke were generated with `pyotp`); `tests/test_phase2_manual.py`.
+
+**Honest run history:** two earlier complete-suite attempts were killed by sandbox restarts mid-run and were discarded (only the completed runs above are reported). During development targeted runs exposed two test-harness issues that were fixed in the tests, not the product: the login rate limiter throttled a test that logs in many times (helper now resets the limiter), and SQLite's one-second `CURRENT_TIMESTAMP` made two challenges created in the same second ambiguous (the test now waits out the second; PostgreSQL has microsecond timestamps). A pre-change quick regression of the legacy authentication tests (121 passed) was a development aid and is not counted above.
+
+## 27.7 Security review, trade-offs and residual risks
+- Verified by tests: no JWT before a valid second factor; wrong/malformed/expired/replayed/locked codes never yield a JWT; replay blocked per time step (including the enrollment confirmation code); bounded skew; challenge expiry, single use and attempt lock; rate limits on login/verify/enrollment; enrollment authorization (code + password, generic errors, lock-out, confirm only with the enrollment token, no other endpoint accepts it); admin-only issuance, no self-reset; recovery wipes the old authenticator and revokes sessions; secrets encrypted at rest and bound to the user; absence of secrets/codes in responses and logs; fail-safe 503 for missing/invalid/shared TOTP key; legacy dev OTP provider not used or logged in TOTP mode.
+- **Residual risks / limitations:** TOTP is not phishing-resistant; the "valid password, not enrolled" 403 discloses account state to someone who already knows the password; recovery depends on a trusted Admin/operator channel; `TOTP_ENCRYPTION_KEY` is a single point of failure (back it up separately; no automatic rotation, changing it forces everyone to re-enroll); `audit_events` has no target-user column, so the target of a code issuance is kept in `user_totp.code_issued_by` (overwritten by a later issuance); the application cannot run on SQLite (tests only); after a login the user must wait for the next 30 s code to sign in again (replay rule); no UI for Admin-issued codes (API/CLI only); no backup codes; SHA-1 HMAC is the authenticator-app default (stronger algorithms are not reliably supported by apps). Carried over unchanged: 501 routes for exam-session security, 4-operation Fabric chaincode, local storage, no migration tool, no evaluation/feedback modules.
+- **Not verified:** a live Hyperledger Fabric network; a real browser; a real authenticator app (codes were generated with `pyotp`, the same library family the apps interoperate with; interoperability with a specific phone app was not tested).
+
+## 27.8 Git
+No commit and no push. Changes are uncommitted on top of `ffca0a8` (together with the uncommitted Phase 6I changes).
+
+## 27.9 Recommended next phase
+**Phase 7B — operational hardening of authentication:** one-time backup/recovery codes (so a lost phone does not always need an Admin), an Admin UI for issuing enrollment codes and viewing who is enrolled, and an automated TOTP-key rotation/re-encryption script. Rationale: Phase 7A makes sign-in real but leaves recovery manual and the key un-rotatable; these are the largest remaining operational gaps before any non-local use. (Alternatively, Phase 7B could start the evaluation/feedback modules if authentication is considered sufficient for the review.)
+
+**Phase 7A status: COMPLETE AND VERIFIED** against the stated criteria (TOTP selected with rationale; flow, enrollment, recovery and encryption implemented; complete backend suites pass on SQLite and fresh PostgreSQL; frontend tests, type-check and build pass; live smoke passed; documentation reconciled; archive `qpaper-system_PHASE_7A_COMPLETE.zip` produced; its size and SHA-256 are reported in the phase report and sidecar `.sha256`, because an archive cannot contain its own checksum).

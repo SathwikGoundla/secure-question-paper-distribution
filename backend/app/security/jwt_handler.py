@@ -57,7 +57,7 @@ def create_access_token(user_id: uuid.UUID, role_name: str, jti: str | None = No
     return token, token_id
 
 
-def create_pre_auth_token(user_id: uuid.UUID) -> str:
+def create_pre_auth_token(user_id: uuid.UUID, mfa: str = "dev_console") -> str:
     """
     Issue a short-lived pre-auth token after password verification
     succeeds (LLD API-01), before OTP has been checked. Intentionally
@@ -70,8 +70,35 @@ def create_pre_auth_token(user_id: uuid.UUID) -> str:
     payload: dict[str, Any] = {
         "sub": str(user_id),
         "purpose": "pre_auth",
+        # Phase 7A: which second factor this challenge belongs to ("totp" or
+        # "dev_console"). Signed, so it cannot be changed by the client; the
+        # verify step rejects a token whose method does not match the
+        # currently configured AUTH_SECOND_FACTOR.
+        "mfa": mfa,
         "iat": now,
         "exp": expires_at,
+    }
+    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
+ENROLLMENT_TOKEN_EXPIRE_MINUTES = 10
+
+
+def create_enrollment_token(user_id: uuid.UUID) -> str:
+    """
+    Phase 7A. Short-lived token issued after a successful enrollment START
+    (valid password + valid one-time enrollment code). It is accepted ONLY by
+    POST /auth/totp/enroll/confirm. Like the pre-auth token it has no role
+    claim and a distinct purpose ("totp_enroll"), so app/api/deps.py rejects it
+    on every protected endpoint: it can never authorize paper access, admin
+    operations or anything else.
+    """
+    now = datetime.now(timezone.utc)
+    payload: dict[str, Any] = {
+        "sub": str(user_id),
+        "purpose": "totp_enroll",
+        "iat": now,
+        "exp": now + timedelta(minutes=ENROLLMENT_TOKEN_EXPIRE_MINUTES),
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 

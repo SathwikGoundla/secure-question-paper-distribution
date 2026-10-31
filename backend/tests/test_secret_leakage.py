@@ -13,47 +13,20 @@ only the dev-only delivery call's SIDE CHANNEL used to read the value
 back in the test, never bypassing or weakening the real verification
 logic itself).
 
-IMPORTANT, HONEST FINDING documented here rather than papered over
-(per the Phase 6E-3 brief: "Inspect actual logging and exception
-behavior before writing tests. Do not invent secret names that do not
-exist" / "do not fabricate results"):
-
-app/security/otp.py's DevConsoleOTPProvider.deliver() DOES log the
-plaintext OTP, via logger.warning(...). This is NOT a newly-discovered
-leak and NOT a Phase 6E-3 regression — it is the project's explicit,
-already-documented, dev-only placeholder OTP delivery mechanism (see
-that class's own docstring: "NOT an approved delivery channel —
-replace before any non-local use"; SRS OQ-4 and LLD DD-12 record the
-real delivery channel as NOT YET DETERMINED).
-
-Precision matters here, so stated exactly as confirmed by inspection
-(app/services/auth_service.py line ~38): DevConsoleOTPProvider is
-currently the ONLY OTPProvider implementation that exists in the
-codebase, and it is instantiated and used UNCONDITIONALLY — there is
-no APP_ENV check, no OTP_DELIVERY_CHANNEL-driven branch, and no
-alternate provider class anywhere in this codebase today. So this is
-"development-only" by DOCUMENTED INTENT and by the fact that no
-production deployment of this system exists yet (SRS OQ-4/LLD DD-12
-are explicitly open questions), but it is NOT currently environment-
-gated in code — running this application with APP_ENV=production
-today would still use DevConsoleOTPProvider and would still log the
-OTP. Implementing real environment-based provider selection, or a
-real delivery channel, is "new authentication architecture" and is
-explicitly out of this phase's scope; it is recorded as a known
-limitation in PROJECT_STATE.md rather than silently fixed here.
-
-Given that, test_otp_appears_in_logs_exactly_once_at_the_documented_
-dev_delivery_point below does NOT claim the OTP "never appears in
-logs" (that would be false, and this docstring does not want to repeat
-that mistake either). It instead proves the TRUE, and actually
-meaningful, property: the OTP appears EXACTLY ONCE, EXACTLY at that
-one documented DevConsoleOTPProvider line, and NOWHERE ELSE — not
-during successful verification, not during failed verification, not
-during lockout, not during rate-limiting, not in any audit/security
-event, and not in any API response. That is the real security boundary
-this phase is responsible for (secrets must never leak through the
-VERIFICATION, AUDIT, or RESPONSE paths), as distinct from the already-
-documented, separately-tracked OTP_DELIVERY_CHANNEL open question.
+PHASE 6I UPDATE (the paragraph that used to be here described the
+UNGATED behaviour of Phase 6E-3: DevConsoleOTPProvider logged the
+plaintext OTP unconditionally, with no APP_ENV check). That is fixed:
+the provider now logs the OTP only when APP_ENV == "development" AND
+OTP_DEV_LOG_ENABLED=true (app/security/otp.py); anywhere else it logs
+nothing and the login fails safely with HTTP 503. The gating itself is
+tested in test_otp_delivery_security.py. The test environment (conftest)
+is a local development context and opts in explicitly, which is what
+lets the exactly-once test below still prove the property it always
+proved: in an opted-in development run, the OTP appears EXACTLY ONCE, at
+the one documented DevConsoleOTPProvider line, and NOWHERE ELSE — not
+during successful verification, failed verification, lockout,
+rate-limiting, any audit/security event, or any API response. No real
+OTP delivery channel exists (SRS OQ-4 / LLD DD-12 remain open).
 """
 
 import logging

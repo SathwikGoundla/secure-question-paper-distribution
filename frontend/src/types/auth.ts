@@ -18,6 +18,36 @@ export interface LoginRequest {
 export interface LoginResponse {
   otp_required: boolean;
   pre_auth_token: string;
+  /** Phase 7A: "totp" when the next step expects an authenticator-app code; absent in the development flow. */
+  second_factor?: string;
+}
+
+/** Phase 7A — POST /auth/totp/enroll/start request body (TotpEnrollStartRequest). */
+export interface TotpEnrollStartRequest {
+  username: string;
+  password: string;
+  enrollment_code: string;
+}
+
+/**
+ * Phase 7A — POST /auth/totp/enroll/start response. `secret` and the QR carry the TOTP secret:
+ * they are returned exactly once and must only be held in component state, never persisted.
+ */
+export interface TotpEnrollStartResponse {
+  enrollment_token: string;
+  provisioning_uri: string;
+  secret: string;
+  qr_svg_data_uri: string;
+  expires_in_seconds: number;
+}
+
+/** Phase 7A — POST /auth/totp/enroll/confirm request / response bodies. */
+export interface TotpEnrollConfirmRequest {
+  enrollment_token: string;
+  otp_code: string;
+}
+export interface TotpEnrollConfirmResponse {
+  enrolled: boolean;
 }
 
 /** POST /auth/otp/verify request body (OtpVerifyRequest). */

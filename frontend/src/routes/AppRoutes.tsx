@@ -3,6 +3,7 @@ import { useAuth } from "../hooks/useAuth";
 import { ProtectedRoute } from "./ProtectedRoute";
 import { LoginPage } from "../pages/auth/LoginPage";
 import { OTPPage } from "../pages/auth/OTPPage";
+import { EnrollPage } from "../pages/auth/EnrollPage";
 import { UnauthorizedPage } from "../pages/errors/UnauthorizedPage";
 import { NotFoundPage } from "../pages/errors/NotFoundPage";
 import { LoadingIndicator } from "../components/common/LoadingIndicator";
@@ -51,6 +52,7 @@ export function AppRoutes() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/otp" element={<OTPPage />} />
+      <Route path="/enroll" element={<EnrollPage />} />
       <Route path="/unauthorized" element={<UnauthorizedPage />} />
 
       <Route

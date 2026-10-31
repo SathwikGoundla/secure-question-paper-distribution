@@ -7,6 +7,8 @@ is explicitly supposed to issue (SEC-010 — "never expose secrets in
 API responses").
 """
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -23,6 +25,10 @@ class LoginResponse(BaseModel):
     """
     otp_required: bool
     pre_auth_token: str
+    # Phase 7A: which second factor the next step expects ("totp" = authenticator
+    # app). Omitted from the JSON for the legacy development flow so that
+    # response is byte-for-byte what it was (route uses response_model_exclude_none).
+    second_factor: str | None = None
 
 
 class OtpVerifyRequest(BaseModel):
@@ -53,3 +59,49 @@ class CurrentUserResponse(BaseModel):
     username: str
     role: str
     centre_id: str | None = None
+
+
+# --------------------------------------------------------------------------- Phase 7A: TOTP enrollment
+
+
+class TotpEnrollStartRequest(BaseModel):
+    """Proof of identity for enrollment: password + the one-time enrollment code issued by an Admin/operator."""
+
+    username: str = Field(min_length=1, max_length=150)
+    password: str = Field(min_length=1, max_length=256)
+    enrollment_code: str = Field(min_length=1, max_length=64)
+
+
+class TotpEnrollStartResponse(BaseModel):
+    """
+    Returned ONCE. `secret` and the QR carry the TOTP secret; they are never
+    returned again (not after confirmation, not on a later call). The
+    enrollment_token is accepted only by /auth/totp/enroll/confirm.
+    """
+
+    enrollment_token: str
+    provisioning_uri: str
+    secret: str
+    qr_svg_data_uri: str
+    expires_in_seconds: int
+
+
+class TotpEnrollConfirmRequest(BaseModel):
+    enrollment_token: str = Field(min_length=1, max_length=4096)
+    otp_code: str = Field(min_length=1, max_length=10)
+
+
+class TotpEnrollConfirmResponse(BaseModel):
+    enrolled: bool
+
+
+class AdminEnrollmentCodeRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=150)
+
+
+class AdminEnrollmentCodeResponse(BaseModel):
+    """The enrollment code is shown exactly once, to the Admin, to hand to the user out-of-band."""
+
+    username: str
+    enrollment_code: str
+    expires_at: datetime
