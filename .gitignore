@@ -6,8 +6,33 @@ dist/
 storage_data/
 *.log
 
-# Frontend
-frontend/.env
-frontend/.env.local
-frontend/.env.*.local
+# Environment and Credentials
+.env
+.env.*
+*.env
+*.admin_creds
+.admin_creds
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+backend/.venv/
+
+# Testing and Coverage
+coverage/
 frontend/coverage/
+.coverage
+htmlcov/
+
+# Local databases and runtime data
+*.sqlite3
+*.db
+pgsql/
+D:/pgsql/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

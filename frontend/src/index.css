@@ -527,3 +527,27 @@ body {
     padding: 1.25rem 1rem;
   }
 }
+
+/* Phase 7A: text-styled button used for "Start over" on the enrollment page. */
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* Phase 7B */
+.admin-callout {
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0;
+}
+.recovery-code-list {
+  columns: 2;
+  font-family: monospace;
+  padding-left: 1.5rem;
+}

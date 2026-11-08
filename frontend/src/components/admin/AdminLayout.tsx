@@ -23,6 +23,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/admin", label: "Dashboard", roles: ["Admin", "Auditor"], end: true },
   { to: "/admin/papers", label: "Question Papers", roles: ["Admin"] },
   { to: "/admin/exam-centres", label: "Exam Centres", roles: ["Admin"] },
+  { to: "/admin/totp", label: "Authenticators", roles: ["Admin"] },
   { to: "/admin/audit-logs", label: "Audit Logs", roles: ["Admin", "Auditor"] },
   { to: "/admin/security-events", label: "Security Events", roles: ["Admin", "Auditor"] },
 ];

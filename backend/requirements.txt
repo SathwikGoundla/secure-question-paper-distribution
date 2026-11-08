@@ -27,6 +27,13 @@ python-multipart==0.0.9
 # --- Cryptography (Phase 3: AES-256-GCM + SHA-256, see app/services/crypto_service.py) ---
 cryptography==43.0.3
 
+# --- Phase 7A: TOTP second factor (RFC 6238) ---
+# pyotp: maintained RFC 4226/6238 implementation (no hand-written crypto).
+# segno: pure-Python QR code generator (no Pillow), used to render the
+# one-time enrollment QR as an inline SVG data URI.
+pyotp==2.9.0
+segno==1.6.1
+
 # --- Testing ---
 pytest==8.3.3
 

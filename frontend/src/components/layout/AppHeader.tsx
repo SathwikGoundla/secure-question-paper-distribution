@@ -1,8 +1,9 @@
+import { Link } from "react-router-dom";
 import { useAuth } from "../../hooks/useAuth";
 import { Button } from "../common/Button";
 
 export function AppHeader() {
-  const { status, user, logout } = useAuth();
+  const { status, user, logout, recoveryCodesRemaining } = useAuth();
 
   return (
     <header className="app-header">
@@ -12,6 +13,12 @@ export function AppHeader() {
           <span>
             {user.username} <span className="role-badge">{user.role}</span>
           </span>
+          {recoveryCodesRemaining !== null && (
+            <span role="status" className="status-badge">
+              Signed in with a recovery code — {recoveryCodesRemaining} left
+            </span>
+          )}
+          <Link to="/security">Security</Link>
           <Button
             type="button"
             variant="secondary"

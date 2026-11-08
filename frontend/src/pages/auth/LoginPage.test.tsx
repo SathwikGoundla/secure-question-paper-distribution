@@ -67,4 +67,30 @@ describe("LoginPage", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Invalid username or password.");
   });
+
+  it("links to authenticator setup (Phase 7A)", () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(401, {})));
+    renderWithProviders(<LoginPage />);
+    expect(screen.getByRole("link", { name: /set up authenticator/i })).toHaveAttribute("href", "/enroll");
+  });
+
+  it("shows enrollment guidance when the account has no authenticator yet (403)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(403, {
+          error: {
+            message:
+              "Authenticator setup is required for this account. Ask your administrator for an enrollment code, then use 'Set up authenticator'.",
+            status_code: 403,
+          },
+        }),
+      ),
+    );
+    renderWithProviders(<LoginPage />);
+    await userEvent.type(screen.getByLabelText(/username/i), "alice");
+    await userEvent.type(screen.getByLabelText(/password/i), "Pa55word!pa55");
+    await userEvent.click(screen.getByRole("button", { name: /sign in/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/authenticator setup is required/i);
+  });
 });

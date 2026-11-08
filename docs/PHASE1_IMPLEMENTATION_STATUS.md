@@ -1,5 +1,8 @@
 # Phase 1 Implementation Status — Implementation Foundation
 
+> **HISTORICAL DOCUMENT — superseded.** This is the original Phase 1 report, written when no later phase existed. Statements such as "latest phase" or "not yet implemented" describe that moment only. The current, verified state is in `../PROJECT_STATE.md` and the READMEs.
+
+
 **Date:** 23 August 2026
 **Source documents:** PRD v2.1, SRS v1.1, HLD v1.1, LLD v1.1 (all Faculty-Review Update)
 **Status: Phase 1 COMPLETE. No later phase has been started.**

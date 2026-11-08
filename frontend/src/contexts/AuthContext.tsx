@@ -7,7 +7,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { getCurrentUser, login as loginRequest, logout as logoutRequest, verifyOtp as verifyOtpRequest } from "../api/endpoints";
+import {
+  getCurrentUser,
+  login as loginRequest,
+  logout as logoutRequest,
+  verifyOtp as verifyOtpRequest,
+  verifyRecoveryCode as verifyRecoveryCodeRequest,
+} from "../api/endpoints";
 import { setAuthToken, setUnauthorizedHandler } from "../api/client";
 import { ApiError } from "../types/api";
 import type { AuthStatus, AuthUser } from "../types/auth";
@@ -38,7 +44,10 @@ interface AuthContextValue {
   /** Login-flow error message (or OTP-flow error), safe to render directly. */
   error: string | null;
   login: (username: string, password: string) => Promise<void>;
-  verifyOtp: (otpCode: string) => Promise<void>;
+  /** `options.recovery` submits the value as a one-time RECOVERY code instead of an authenticator code. */
+  verifyOtp: (otpCode: string, options?: { recovery?: boolean }) => Promise<void>;
+  /** Phase 7B: set after a recovery-code sign-in (how many codes are left); null otherwise. */
+  recoveryCodesRemaining: number | null;
   /** Abandon an in-progress OTP step and return to the login form. */
   cancelOtp: () => void;
   logout: () => Promise<void>;
@@ -66,6 +75,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>("unauthenticated");
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
+  const [recoveryCodesRemaining, setRecoveryCodesRemaining] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Held only in memory (never persisted) — it is short-lived (backend
   // default: 5 minutes) and is only needed to complete the OTP step
@@ -144,7 +154,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const verifyOtp = useCallback(
-    async (otpCode: string) => {
+    async (otpCode: string, options?: { recovery?: boolean }) => {
       if (!preAuthToken) {
         setError("Your login attempt has expired. Please log in again.");
         setStatus("unauthenticated");
@@ -152,7 +162,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       setError(null);
       try {
-        const result = await verifyOtpRequest({ pre_auth_token: preAuthToken, otp_code: otpCode });
+        const result = options?.recovery
+          ? await verifyRecoveryCodeRequest({ pre_auth_token: preAuthToken, recovery_code: otpCode })
+          : await verifyOtpRequest({ pre_auth_token: preAuthToken, otp_code: otpCode });
+        setRecoveryCodesRemaining(result.recovery_codes_remaining ?? null);
         setAuthToken(result.access_token);
         sessionStorage.setItem(TOKEN_STORAGE_KEY, result.access_token);
         setPreAuthToken(null);
@@ -197,13 +210,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       setPreAuthToken(null);
       setError(null);
+      setRecoveryCodesRemaining(null);
       setStatus("unauthenticated");
     }
   }, []);
 
   const value = useMemo(
-    () => ({ status, user, isInitializing, error, login, verifyOtp, cancelOtp, logout, clearError }),
-    [status, user, isInitializing, error, login, verifyOtp, cancelOtp, logout, clearError],
+    () => ({ status, user, isInitializing, error, login, verifyOtp, recoveryCodesRemaining, cancelOtp, logout, clearError }),
+    [status, user, isInitializing, error, login, verifyOtp, recoveryCodesRemaining, cancelOtp, logout, clearError],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

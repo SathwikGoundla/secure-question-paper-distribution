@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Navigate } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { useAuth } from "../../hooks/useAuth";
 import { Button } from "../../components/common/Button";
 import { Input } from "../../components/common/Input";
@@ -72,6 +72,9 @@ export function LoginPage() {
             Sign in
           </Button>
         </form>
+        <p className="auth-subtitle">
+          First time, or lost your phone? <Link to="/enroll">Set up authenticator</Link>
+        </p>
       </div>
     </PageContainer>
   );

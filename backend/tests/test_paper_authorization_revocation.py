@@ -266,8 +266,8 @@ def test_revoked_centre_denied_retrieval(client, admin_principal, authorized_pap
     assert revoke_resp.status_code == 200, revoke_resp.text
 
     after_resp = client.get(f"/api/v1/papers/{paper_id}/retrieve", headers=auth_header(centre_a))
-    assert after_resp.status_code == 403
-    assert after_resp.json()["error"]["message"] == "You are not authorized to access this paper."
+    assert after_resp.status_code == 404
+    assert after_resp.json()["error"]["message"] == "The requested resource was not found."
 
 
 def test_revoked_paper_disappears_from_centre_list(client, admin_principal, authorized_paper, centre_a):
@@ -296,7 +296,7 @@ def test_revoked_centre_denied_metadata_view(client, admin_principal, authorized
     )
 
     resp = client.get(f"/api/v1/papers/{paper_id}", headers=auth_header(centre_a))
-    assert resp.status_code == 403
+    assert resp.status_code == 404
 
 
 # ===========================================================================

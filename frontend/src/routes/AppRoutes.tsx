@@ -3,6 +3,9 @@ import { useAuth } from "../hooks/useAuth";
 import { ProtectedRoute } from "./ProtectedRoute";
 import { LoginPage } from "../pages/auth/LoginPage";
 import { OTPPage } from "../pages/auth/OTPPage";
+import { EnrollPage } from "../pages/auth/EnrollPage";
+import { SecuritySettingsPage } from "../pages/auth/SecuritySettingsPage";
+import { TotpManagementPage } from "../pages/admin/totp/TotpManagementPage";
 import { UnauthorizedPage } from "../pages/errors/UnauthorizedPage";
 import { NotFoundPage } from "../pages/errors/NotFoundPage";
 import { LoadingIndicator } from "../components/common/LoadingIndicator";
@@ -51,6 +54,15 @@ export function AppRoutes() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/otp" element={<OTPPage />} />
+      <Route path="/enroll" element={<EnrollPage />} />
+      <Route
+        path="/security"
+        element={
+          <ProtectedRoute>
+            <SecuritySettingsPage />
+          </ProtectedRoute>
+        }
+      />
       <Route path="/unauthorized" element={<UnauthorizedPage />} />
 
       <Route
@@ -91,6 +103,14 @@ export function AppRoutes() {
           element={
             <ProtectedRoute allowedRoles={["Admin"]}>
               <ExamCentresPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="totp"
+          element={
+            <ProtectedRoute allowedRoles={["Admin"]}>
+              <TotpManagementPage />
             </ProtectedRoute>
           }
         />

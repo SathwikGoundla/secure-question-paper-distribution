@@ -20,6 +20,7 @@ import { PageContainer } from "../../components/layout/PageContainer";
 export function OTPPage() {
   const { status, error, verifyOtp, cancelOtp, clearError } = useAuth();
   const [otpCode, setOtpCode] = useState("");
+  const [useRecovery, setUseRecovery] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
   if (status === "authenticated") {
@@ -29,49 +30,98 @@ export function OTPPage() {
     return <Navigate to="/login" replace />;
   }
 
+  function switchMode(recovery: boolean) {
+    setUseRecovery(recovery);
+    setOtpCode("");
+    setValidationError(null);
+    clearError();
+  }
+
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     clearError();
 
-    if (!otpCode.trim()) {
-      setValidationError("Please enter the one-time passcode.");
+    const value = otpCode.trim();
+    if (!value) {
+      setValidationError(
+        useRecovery ? "Please enter one of your recovery codes." : "Please enter the one-time passcode.",
+      );
+      return;
+    }
+    if (useRecovery && value.replace(/[\s-]/g, "").length !== 16) {
+      setValidationError("A recovery code has 16 letters and numbers, for example ABCD-EFGH-JKMN-PQRS.");
       return;
     }
     setValidationError(null);
-    // Never logged: the OTP value is used only in this in-memory
-    // submit call and is never written to console/log output anywhere
-    // in the frontend.
-    void verifyOtp(otpCode.trim());
+    // Never logged: the code is used only in this in-memory submit call and is never written to
+    // console/log output anywhere in the frontend.
+    void verifyOtp(value, { recovery: useRecovery });
   }
 
   return (
     <PageContainer>
       <div className="auth-card">
-        <h1>Enter verification code</h1>
+        <h1>{useRecovery ? "Use a recovery code" : "Enter verification code"}</h1>
         <p className="auth-subtitle">
-          Enter the one-time passcode (OTP) to complete sign-in.
+          {useRecovery
+            ? "Enter one of the one-time recovery codes you saved. Each code works only once."
+            : "Enter the 6-digit code from your authenticator app to complete sign-in."}
         </p>
 
         <form onSubmit={handleSubmit} noValidate>
-          <Input
-            id="otp-code"
-            label="One-time passcode"
-            type="text"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            value={otpCode}
-            onChange={(e) => setOtpCode(e.target.value)}
-            maxLength={10}
-            required
-          />
+          {useRecovery ? (
+            <Input
+              id="recovery-code"
+              label="Recovery code"
+              type="text"
+              autoComplete="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              placeholder="XXXX-XXXX-XXXX-XXXX"
+              value={otpCode}
+              onChange={(e) => setOtpCode(e.target.value)}
+              maxLength={32}
+              required
+            />
+          ) : (
+            <Input
+              id="otp-code"
+              label="One-time passcode"
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={otpCode}
+              onChange={(e) => setOtpCode(e.target.value)}
+              maxLength={10}
+              required
+            />
+          )}
 
           <ErrorBanner message={validationError ?? error} />
 
-          <Button type="submit">Verify</Button>
+          <Button type="submit">{useRecovery ? "Sign in with recovery code" : "Verify"}</Button>
           <Button type="button" variant="secondary" onClick={cancelOtp}>
             Start over
           </Button>
         </form>
+
+        <p className="auth-subtitle">
+          {useRecovery ? (
+            <button type="button" className="link-button" onClick={() => switchMode(false)}>
+              Back to authenticator code
+            </button>
+          ) : (
+            <button type="button" className="link-button" onClick={() => switchMode(true)}>
+              Use a recovery code
+            </button>
+          )}
+        </p>
+        {useRecovery && (
+          <p className="auth-subtitle">
+            A used, mistyped or replaced code is rejected with the same message. If none of your codes work, ask
+            your administrator for a new enrollment code.
+          </p>
+        )}
       </div>
     </PageContainer>
   );

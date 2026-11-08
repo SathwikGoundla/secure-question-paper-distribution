@@ -154,7 +154,10 @@ def test_retrieval_denied_for_unauthorized_centre(client, admin_principal, exam_
     retrieve_response = client.get(
         f"/api/v1/papers/{paper_id}/retrieve", headers=auth_header(exam_centre_principal)
     )
-    assert retrieve_response.status_code == 403
+    # Phase 6I disclosure policy: identical generic 404 (was 403) so a centre cannot tell an
+    # existing-but-unauthorized paper from an unknown one. Still denied, still no content.
+    assert retrieve_response.status_code == 404
+    assert retrieve_response.json()["error"]["message"] == "The requested resource was not found."
 
 
 def test_admin_cannot_call_retrieve_endpoint(client, admin_principal):

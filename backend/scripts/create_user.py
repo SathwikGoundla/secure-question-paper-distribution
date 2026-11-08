@@ -88,6 +88,11 @@ def main() -> None:
     args = parser.parse_args()
 
     create_user(args.username, args.password, args.role, args.centre_id)
+    print(
+        "Next (Phase 7A): this account cannot sign in until an authenticator is enrolled. Run\n"
+        f"    python -m scripts.totp_enroll_code --username {args.username}\n"
+        "and give the printed one-time code to the user (or have an Admin issue one)."
+    )
 
 
 if __name__ == "__main__":

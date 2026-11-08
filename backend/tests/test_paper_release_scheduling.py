@@ -220,7 +220,8 @@ def test_status_reports_locked_then_released(client, admin_principal, locked_pap
 
 def test_status_denied_to_unauthorized_centre(client, released_paper, centre_b):
     resp = client.get(f"/api/v1/papers/{released_paper}/status", headers=auth_header(centre_b))
-    assert resp.status_code == 403
+    # Phase 6I disclosure policy: generic 404 (was 403); the release state is still never disclosed.
+    assert resp.status_code == 404
     assert "lock_status" not in resp.text
 
 

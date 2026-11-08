@@ -95,8 +95,9 @@ def test_pagination(client, admin_principal):
 
 
 def test_response_includes_actor_username_and_excludes_secrets(client, admin_principal):
-    _register_paper(client, admin_principal)
-    response = client.get("/api/v1/audit/logs?page_size=200", headers=auth_header(admin_principal))
+    resp = _register_paper(client, admin_principal)
+    paper_id = resp.json()["paper_id"]
+    response = client.get(f"/api/v1/audit/logs?paper_id={paper_id}", headers=auth_header(admin_principal))
     body = response.json()
     matching = [i for i in body["items"] if i["event_type"] == "PAPER_REGISTRATION_COMPLETED"]
     assert matching

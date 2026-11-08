@@ -17,6 +17,15 @@ import type {
   LoginResponse,
   OtpVerifyRequest,
   OtpVerifyResponse,
+  AdminEnrollmentCodeResponse,
+  AdminTotpUserListResponse,
+  RecoveryCodesResponse,
+  RecoveryCodeStatusResponse,
+  RecoveryCodeVerifyRequest,
+  TotpEnrollConfirmRequest,
+  TotpEnrollConfirmResponse,
+  TotpEnrollStartRequest,
+  TotpEnrollStartResponse,
 } from "../types/auth";
 import type {
   NotImplementedResponse,
@@ -54,6 +63,66 @@ export function verifyOtp(payload: OtpVerifyRequest): Promise<OtpVerifyResponse>
     method: "POST",
     body: payload,
     authenticated: false,
+  });
+}
+
+/**
+ * POST /api/v1/auth/totp/enroll/start — Phase 7A. Password + one-time enrollment code (issued by an
+ * Admin or the server operator) -> TOTP secret / QR, returned exactly once.
+ */
+export function totpEnrollStart(payload: TotpEnrollStartRequest): Promise<TotpEnrollStartResponse> {
+  return apiRequest<TotpEnrollStartResponse>("/auth/totp/enroll/start", {
+    method: "POST",
+    body: payload,
+    authenticated: false,
+  });
+}
+
+/** POST /api/v1/auth/totp/enroll/confirm — Phase 7A. A valid code from the app activates the authenticator. */
+export function totpEnrollConfirm(payload: TotpEnrollConfirmRequest): Promise<TotpEnrollConfirmResponse> {
+  return apiRequest<TotpEnrollConfirmResponse>("/auth/totp/enroll/confirm", {
+    method: "POST",
+    body: payload,
+    authenticated: false,
+  });
+}
+
+/** POST /api/v1/auth/recovery-code/verify — Phase 7B. Second factor using a one-time recovery code. */
+export function verifyRecoveryCode(payload: RecoveryCodeVerifyRequest): Promise<OtpVerifyResponse> {
+  return apiRequest<OtpVerifyResponse>("/auth/recovery-code/verify", {
+    method: "POST",
+    body: payload,
+    authenticated: false,
+  });
+}
+
+/** GET /api/v1/auth/recovery-codes/status — Phase 7B. Counts only. */
+export function getRecoveryCodeStatus(): Promise<RecoveryCodeStatusResponse> {
+  return apiRequest<RecoveryCodeStatusResponse>("/auth/recovery-codes/status", { method: "GET" });
+}
+
+/** POST /api/v1/auth/recovery-codes/regenerate — Phase 7B. Needs the current password; codes returned once. */
+export function regenerateRecoveryCodes(password: string): Promise<RecoveryCodesResponse> {
+  return apiRequest<RecoveryCodesResponse>("/auth/recovery-codes/regenerate", {
+    method: "POST",
+    body: { password },
+  });
+}
+
+/** GET /api/v1/admin/totp/users — Phase 7B. Admin-only enrollment status list. */
+export function listTotpUsers(params: { page?: number; pageSize?: number; q?: string } = {}): Promise<AdminTotpUserListResponse> {
+  const query = new URLSearchParams();
+  query.set("page", String(params.page ?? 1));
+  query.set("page_size", String(params.pageSize ?? 50));
+  if (params.q) query.set("q", params.q);
+  return apiRequest<AdminTotpUserListResponse>(`/admin/totp/users?${query.toString()}`, { method: "GET" });
+}
+
+/** POST /api/v1/admin/totp/enrollment-codes — Phase 7A endpoint. Returns the one-time code ONCE. */
+export function issueTotpEnrollmentCode(username: string): Promise<AdminEnrollmentCodeResponse> {
+  return apiRequest<AdminEnrollmentCodeResponse>("/admin/totp/enrollment-codes", {
+    method: "POST",
+    body: { username },
   });
 }
 

@@ -66,6 +66,39 @@ class Settings(BaseSettings):
     # OTP_DELIVERY_CHANNEL intentionally has no safe default — it must be explicitly
     # set once the channel (email/authenticator app) is decided (see LLD DD-12).
     OTP_DELIVERY_CHANNEL: str = Field(default="NOT_YET_DETERMINED")
+    # Phase 6I: explicit opt-in for the development-only OTP "delivery" that logs
+    # the plaintext OTP (security/otp.py DevConsoleOTPProvider). Off by default.
+    # It takes effect ONLY when APP_ENV == "development" (exactly); in staging,
+    # production or any other value the OTP is never logged, whatever this is set
+    # to, and login fails safely (HTTP 503) because no real channel exists yet.
+    OTP_DEV_LOG_ENABLED: bool = Field(default=False)
+
+    # --- Phase 7A: second factor -------------------------------------------------
+    # "totp"        (default, the real method): authenticator-app codes (RFC 6238).
+    # "dev_console" development-only: the legacy console OTP, still gated by
+    #               APP_ENV=development AND OTP_DEV_LOG_ENABLED=true (Phase 6I).
+    AUTH_SECOND_FACTOR: str = Field(default="totp")
+    # Dedicated key that encrypts TOTP secrets at rest (AES-256-GCM). Base64 of 32
+    # random bytes. MUST differ from QUESTION_PAPER_MASTER_KEY. Required when
+    # AUTH_SECOND_FACTOR=totp; if absent/invalid, TOTP login and enrollment fail
+    # safely with HTTP 503 (nothing is generated, nothing is logged).
+    TOTP_ENCRYPTION_KEY: str = Field(default="")
+    # Phase 7B keyring. TOTP_ENCRYPTION_KEY above keeps working and is the key with id "legacy"
+    # (it decrypts every Phase 7A record). Additional/rotated keys are listed here as
+    # "id=base64key,id2=base64key" (ids: letters, digits, . _ -, max 32 chars; "legacy" is reserved).
+    # New secrets are encrypted with TOTP_ACTIVE_KEY_ID. When more than one key is configured
+    # TOTP_ACTIVE_KEY_ID MUST be set explicitly (no accidental writes under the wrong key).
+    TOTP_ENCRYPTION_KEYS: str = Field(default="")
+    TOTP_ACTIVE_KEY_ID: str = Field(default="")
+    TOTP_ISSUER: str = Field(default="QPaper System")
+    # Accepted clock skew in 30-second steps on each side of "now". 1 = +/-30 s.
+    TOTP_VALID_WINDOW: int = Field(default=1)
+    # Lifetime of an administrator/CLI-issued one-time enrollment code.
+    TOTP_ENROLLMENT_CODE_TTL_HOURS: int = Field(default=24)
+    # Wrong enrollment code / wrong confirmation code attempts before the enrollment is locked.
+    TOTP_ENROLLMENT_MAX_ATTEMPTS: int = Field(default=5)
+    # Phase 7B: number of one-time recovery codes generated per set.
+    RECOVERY_CODE_COUNT: int = Field(default=10)
     OTP_EXPIRE_SECONDS: int = Field(default=300)
     # Phase 6E-1: bounds how many FAILED verification attempts a single
     # OTP challenge tolerates before it is treated as exhausted/locked
@@ -195,6 +228,36 @@ class Settings(BaseSettings):
 
     # --- Logging ---
     LOG_LEVEL: str = Field(default="INFO")
+
+    @field_validator("AUTH_SECOND_FACTOR")
+    @classmethod
+    def _second_factor_must_be_known(cls, value: str) -> str:
+        v = value.strip().lower()
+        if v not in {"totp", "dev_console"}:
+            raise ValueError("AUTH_SECOND_FACTOR must be 'totp' or 'dev_console'.")
+        return v
+
+    @field_validator("RECOVERY_CODE_COUNT")
+    @classmethod
+    def _recovery_count_is_reasonable(cls, value: int) -> int:
+        if not 5 <= value <= 20:
+            raise ValueError("RECOVERY_CODE_COUNT must be between 5 and 20.")
+        return value
+
+    @field_validator("TOTP_VALID_WINDOW")
+    @classmethod
+    def _totp_window_is_narrow(cls, value: int) -> int:
+        if not 0 <= value <= 2:
+            raise ValueError("TOTP_VALID_WINDOW must be between 0 and 2 (30-second steps).")
+        return value
+
+    @field_validator("CORS_ORIGINS")
+    @classmethod
+    def _cors_origins_must_be_explicit(cls, value: str) -> str:
+        """Phase 6I: there is no permissive origin fallback. A wildcard is refused at startup."""
+        if any(origin.strip() == "*" for origin in value.split(",")):
+            raise ValueError("CORS_ORIGINS must list explicit origins; '*' is not allowed.")
+        return value
 
     @property
     def cors_origins_list(self) -> List[str]:

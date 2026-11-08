@@ -30,7 +30,13 @@ from app.schemas.admin import (
     CentreUpdateRequest,
     DashboardSummaryResponse,
 )
-from app.services import centre_service, dashboard_service
+from app.schemas.auth import (
+    AdminEnrollmentCodeRequest,
+    AdminEnrollmentCodeResponse,
+    AdminTotpUserItem,
+    AdminTotpUserListResponse,
+)
+from app.services import centre_service, dashboard_service, totp_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -124,3 +130,54 @@ def dashboard_summary(db: Session = Depends(get_db)) -> DashboardSummaryResponse
 def exam_security_events() -> dict:
     """LLD API-15 (Faculty-Review Addition). Out of Phase 6C's scope — untouched."""
     return {"detail": "Not implemented yet — planned for the examination-session-security implementation phase."}
+
+
+@router.post(
+    "/totp/enrollment-codes",
+    response_model=AdminEnrollmentCodeResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Issue a one-time authenticator enrollment code for another user (Admin only)",
+    responses={
+        401: {"description": "Not authenticated."},
+        403: {"description": "Not an Admin, or the target is the caller (use the server CLI)."},
+        404: {"description": "Unknown or inactive user."},
+    },
+)
+def issue_totp_enrollment_code(
+    body: AdminEnrollmentCodeRequest,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(require_role("Admin")),
+) -> AdminEnrollmentCodeResponse:
+    """
+    Phase 7A account-recovery / provisioning. Wipes the target's existing
+    authenticator immediately, revokes the target's active sessions, and
+    returns a new single-use enrollment code (shown once; hand it to the user
+    out-of-band). Audited as TOTP_ENROLLMENT_CODE_ISSUED. The code is never
+    logged. An Admin cannot reset their own authenticator through the API.
+    """
+    target, code, expires_at = totp_service.admin_issue_enrollment_code(db, current_user, body.username)
+    return AdminEnrollmentCodeResponse(username=target.username, enrollment_code=code, expires_at=expires_at)
+
+
+@router.get(
+    "/totp/users",
+    response_model=AdminTotpUserListResponse,
+    summary="Authenticator enrollment status of users (Admin only)",
+    responses={401: {"description": "Not authenticated."}, 403: {"description": "Not an Admin."}},
+)
+def list_totp_enrollment_status(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    q: str | None = Query(default=None, max_length=100, description="Case-insensitive username filter."),
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(require_role("Admin")),
+) -> AdminTotpUserListResponse:
+    """
+    Phase 7B. Read-only, Admin-only. Shows each active user's enrollment STATE (see AdminTotpUserItem),
+    never a secret, a code, a hash or recovery-code material. `is_self` marks the caller, who cannot
+    issue a code for themselves here (use the server CLI).
+    """
+    items, total = totp_service.list_enrollment_status(db, current_user, page, page_size, q)
+    return AdminTotpUserListResponse(
+        items=[AdminTotpUserItem(**i) for i in items], total=total, page=page, page_size=page_size
+    )

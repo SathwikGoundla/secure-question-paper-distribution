@@ -17,6 +17,9 @@ service function is simply never called on a rate-limited request.
 
 import hashlib
 import logging
+import uuid
+
+import jwt as pyjwt
 
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
@@ -24,8 +27,16 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUser, get_current_user
 from app.config import get_settings
 from app.database import get_db
-from app.exceptions.base import TooManyRequestsException
+from app.exceptions.base import TooManyRequestsException, UnauthorizedException
 from app.schemas.auth import (
+    RecoveryCodeRegenerateRequest,
+    RecoveryCodeStatusResponse,
+    RecoveryCodesResponse,
+    RecoveryCodeVerifyRequest,
+    TotpEnrollConfirmRequest,
+    TotpEnrollConfirmResponse,
+    TotpEnrollStartRequest,
+    TotpEnrollStartResponse,
     CurrentUserResponse,
     LoginRequest,
     LoginResponse,
@@ -34,7 +45,11 @@ from app.schemas.auth import (
     OtpVerifyResponse,
 )
 from app.security.rate_limiter import FixedWindowRateLimiter
-from app.services import auth_service
+from app.security.jwt_handler import ENROLLMENT_TOKEN_EXPIRE_MINUTES, create_enrollment_token, decode_access_token
+from app.models.user import User
+from app.security.password import verify_password
+from app.services import auth_service, recovery_code_service, totp_service
+from app.services.audit_service import record_security_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -54,6 +69,24 @@ _login_limiter = FixedWindowRateLimiter(
 _otp_limiter = FixedWindowRateLimiter(
     limit=_settings.AUTH_OTP_RATE_LIMIT,
     window_seconds=_settings.AUTH_OTP_RATE_WINDOW_SECONDS,
+)
+# Phase 7A: enrollment endpoints get their own budgets (same limits as login / OTP verify).
+_enroll_start_limiter = FixedWindowRateLimiter(
+    limit=_settings.AUTH_LOGIN_RATE_LIMIT,
+    window_seconds=_settings.AUTH_LOGIN_RATE_WINDOW_SECONDS,
+)
+_enroll_confirm_limiter = FixedWindowRateLimiter(
+    limit=_settings.AUTH_OTP_RATE_LIMIT,
+    window_seconds=_settings.AUTH_OTP_RATE_WINDOW_SECONDS,
+)
+# Phase 7B: recovery-code verification and (re)generation budgets.
+_recovery_verify_limiter = FixedWindowRateLimiter(
+    limit=_settings.AUTH_OTP_RATE_LIMIT,
+    window_seconds=_settings.AUTH_OTP_RATE_WINDOW_SECONDS,
+)
+_recovery_regen_limiter = FixedWindowRateLimiter(
+    limit=_settings.AUTH_LOGIN_RATE_LIMIT,
+    window_seconds=_settings.AUTH_LOGIN_RATE_WINDOW_SECONDS,
 )
 
 
@@ -125,6 +158,7 @@ def enforce_otp_rate_limit(request: Request, payload: OtpVerifyRequest) -> None:
     "/login",
     response_model=LoginResponse,
     status_code=status.HTTP_200_OK,
+    response_model_exclude_none=True,
     dependencies=[Depends(enforce_login_rate_limit)],
 )
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
@@ -140,6 +174,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
 @router.post(
     "/otp/verify",
     response_model=OtpVerifyResponse,
+    response_model_exclude_none=True,
     status_code=status.HTTP_200_OK,
     dependencies=[Depends(enforce_otp_rate_limit)],
 )
@@ -181,3 +216,153 @@ def get_me(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser
         role=current_user.role_name,
         centre_id=str(current_user.centre_id) if current_user.centre_id else None,
     )
+
+
+def enforce_enroll_start_rate_limit(request: Request, payload: TotpEnrollStartRequest) -> None:
+    """Phase 7A. Key = client IP + normalized username; runs before any DB lookup."""
+    key = f"{_client_ip(request)}:{payload.username.strip().lower()}"
+    if not _enroll_start_limiter.allow(key):
+        raise TooManyRequestsException(retry_after_seconds=_enroll_start_limiter.retry_after_seconds(key))
+
+
+def enforce_enroll_confirm_rate_limit(request: Request, payload: TotpEnrollConfirmRequest) -> None:
+    """Phase 7A. Key = client IP + hash of the enrollment token (never the token itself)."""
+    key = f"{_client_ip(request)}:{_otp_challenge_identity(payload.enrollment_token)}"
+    if not _enroll_confirm_limiter.allow(key):
+        raise TooManyRequestsException(retry_after_seconds=_enroll_confirm_limiter.retry_after_seconds(key))
+
+
+@router.post(
+    "/totp/enroll/start",
+    response_model=TotpEnrollStartResponse,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(enforce_enroll_start_rate_limit)],
+    summary="Start authenticator enrollment (password + one-time enrollment code)",
+    responses={
+        401: {"description": "Invalid username, password or enrollment code (one generic message for every cause)."},
+        429: {"description": "Rate limited."},
+        503: {"description": "TOTP security configuration unavailable."},
+    },
+)
+def totp_enroll_start(payload: TotpEnrollStartRequest, db: Session = Depends(get_db)) -> TotpEnrollStartResponse:
+    """
+    Phase 7A. Public (no JWT exists yet) but gated by password AND a one-time
+    enrollment code issued by an Admin or the server operator. Returns the
+    TOTP secret / QR exactly once; it is stored only encrypted and is never
+    returned again. The authenticator is NOT active until
+    /auth/totp/enroll/confirm succeeds.
+    """
+    started = totp_service.start_enrollment(db, payload.username, payload.password, payload.enrollment_code)
+    return TotpEnrollStartResponse(
+        enrollment_token=create_enrollment_token(started.user_id),
+        provisioning_uri=started.provisioning_uri,
+        secret=started.secret_b32,
+        qr_svg_data_uri=started.qr_svg_data_uri,
+        expires_in_seconds=ENROLLMENT_TOKEN_EXPIRE_MINUTES * 60,
+    )
+
+
+@router.post(
+    "/totp/enroll/confirm",
+    response_model=TotpEnrollConfirmResponse,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(enforce_enroll_confirm_rate_limit)],
+    summary="Confirm authenticator enrollment with a code from the app",
+    responses={
+        401: {"description": "Invalid/expired enrollment token or wrong code."},
+        429: {"description": "Rate limited."},
+    },
+)
+def totp_enroll_confirm(payload: TotpEnrollConfirmRequest, db: Session = Depends(get_db)) -> TotpEnrollConfirmResponse:
+    """
+    Phase 7A. Accepts ONLY an enrollment token (purpose "totp_enroll"); a
+    session or pre-auth token is rejected. Activates the authenticator when
+    the submitted code is valid. Issues NO session: the user then signs in
+    normally (password, then a fresh authenticator code).
+    """
+    try:
+        claims = decode_access_token(payload.enrollment_token)
+    except pyjwt.PyJWTError:
+        raise UnauthorizedException("Invalid or expired enrollment token.")
+    if claims.get("purpose") != "totp_enroll":
+        raise UnauthorizedException("Invalid or expired enrollment token.")
+    totp_service.confirm_enrollment(db, uuid.UUID(claims["sub"]), payload.otp_code)
+    return TotpEnrollConfirmResponse(enrolled=True)
+
+
+def enforce_recovery_verify_rate_limit(request: Request, payload: RecoveryCodeVerifyRequest) -> None:
+    """Phase 7B. Key = client IP + challenge identity (hash of the pre-auth token), before any DB work."""
+    key = f"{_client_ip(request)}:{_otp_challenge_identity(payload.pre_auth_token)}"
+    if not _recovery_verify_limiter.allow(key):
+        raise TooManyRequestsException(retry_after_seconds=_recovery_verify_limiter.retry_after_seconds(key))
+
+
+@router.post(
+    "/recovery-code/verify",
+    response_model=OtpVerifyResponse,
+    response_model_exclude_none=True,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(enforce_recovery_verify_rate_limit)],
+    summary="Second-factor step using a one-time recovery code",
+    responses={
+        401: {"description": "Invalid/expired challenge, wrong, malformed, used or revoked code (one generic message)."},
+        429: {"description": "Rate limited."},
+    },
+)
+def verify_recovery_code(payload: RecoveryCodeVerifyRequest, db: Session = Depends(get_db)) -> OtpVerifyResponse:
+    """
+    Phase 7B. Takes the pre-auth token issued AFTER a correct password (so the password is never
+    bypassed) and one unused recovery code. The code is consumed atomically; the normal JWT is issued
+    only on success; the user's other sessions are revoked; the response states how many codes remain.
+    Shares the per-challenge attempt limit with the authenticator-code step.
+    """
+    return auth_service.verify_otp_step2(db, payload.pre_auth_token, payload.recovery_code, recovery=True)
+
+
+@router.get(
+    "/recovery-codes/status",
+    response_model=RecoveryCodeStatusResponse,
+    summary="How many unused recovery codes the signed-in user has (counts only)",
+)
+def recovery_codes_status(
+    db: Session = Depends(get_db), current_user: CurrentUser = Depends(get_current_user)
+) -> RecoveryCodeStatusResponse:
+    count, generated_at = recovery_code_service.status(db, current_user.user_id)
+    return RecoveryCodeStatusResponse(
+        unused_count=count,
+        generated_at=generated_at,
+        authenticator_active=totp_service.get_active(db, current_user.user_id) is not None,
+    )
+
+
+@router.post(
+    "/recovery-codes/regenerate",
+    response_model=RecoveryCodesResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate a NEW set of recovery codes (invalidates the previous set); shown once",
+    responses={
+        401: {"description": "Not signed in with a full session, or wrong password."},
+        409: {"description": "No active authenticator yet."},
+        429: {"description": "Rate limited."},
+    },
+)
+def regenerate_recovery_codes(
+    payload: RecoveryCodeRegenerateRequest,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> RecoveryCodesResponse:
+    """
+    Phase 7B. Requires a normal session JWT (only ever issued after password AND a second factor; a
+    pre-auth or enrollment token is rejected by get_current_user) PLUS the current password (step-up).
+    The plaintext codes are in this response only; they are never retrievable again.
+    """
+    key = str(current_user.user_id)
+    if not _recovery_regen_limiter.allow(key):
+        raise TooManyRequestsException(retry_after_seconds=_recovery_regen_limiter.retry_after_seconds(key))
+    user = db.get(User, current_user.user_id)
+    if user is None or not verify_password(payload.password, user.password_hash):
+        record_security_event(db, "RECOVERY_REGENERATE_FAILED", actor_id=current_user.user_id)
+        raise UnauthorizedException("Incorrect password.")
+    codes = recovery_code_service.regenerate(db, user)
+    _count, generated_at = recovery_code_service.status(db, user.user_id)
+    return RecoveryCodesResponse(codes=codes, count=len(codes), generated_at=generated_at)

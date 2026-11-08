@@ -11,19 +11,16 @@ Centre A can never access or manipulate a resource that legitimately
 belongs only to Examination Centre B, and vice versa, purely via
 backend HTTP responses.
 
-Inspection finding (documented, not changed): app/services/
-paper_service.py's get_paper_by_id_or_404() always runs BEFORE the
-authorization check in get_paper_metadata()/retrieve_paper(). This
-means an EXISTING paper the caller is not authorized for returns 403
-(not 404) — the paper's existence as a UUID is therefore technically
-distinguishable from a UUID that was never registered at all (which
-returns 404). This is existing, documented, Phase 3/4 behavior, not a
-Phase 6E-3 regression: it reveals only that *some* paper_id exists,
-never its subject, status, hash, schedule, or content, and changing
-it was explicitly out of scope for this phase ("do not automatically
-modify production code" / "do not make speculative security
-changes"). Test 10 below exercises and documents this exact boundary
-rather than silently assuming a different, invented behavior.
+Disclosure policy (changed in Phase 6I; this docstring previously
+documented the OLD behaviour): for an Examination Centre, an EXISTING
+paper it is not authorized for and a paper_id that was never registered
+now return the IDENTICAL 404 "The requested resource was not found."
+(same status, same body) on GET /papers/{id}, /status and /retrieve, so
+the existence of a paper_id is no longer distinguishable. Authorization
+is still enforced first and in full, and the UNAUTHORIZED_ACCESS /
+DENIED audit records are still written for existing-but-unauthorized
+papers. No subject, status, hash, schedule or content is ever returned
+to an unauthorized centre. See PROJECT_STATE.md Phase 6I.
 
 Endpoint-coverage note for "IDOR TEST 9" (object access via any
 client-supplied ID): the actual API surface, confirmed by direct
@@ -184,9 +181,9 @@ def test_centre_a_cannot_view_centre_b_paper_detail(client, two_papers, centre_a
 
     resp = client.get(f"/api/v1/papers/{paper_b_id}", headers=auth_header(centre_a))
 
-    assert resp.status_code == 403
+    assert resp.status_code == 404
     body = resp.json()
-    assert body["error"]["message"] == "You are not authorized to access this paper."
+    assert body["error"]["message"] == "The requested resource was not found."
     # No paper metadata of any kind leaked in the rejection body.
     raw = resp.text
     assert "IDOR Paper B" not in raw  # the subject
@@ -199,8 +196,8 @@ def test_centre_b_cannot_view_centre_a_paper_detail(client, two_papers, centre_b
 
     resp = client.get(f"/api/v1/papers/{paper_a_id}", headers=auth_header(centre_b))
 
-    assert resp.status_code == 403
-    assert resp.json()["error"]["message"] == "You are not authorized to access this paper."
+    assert resp.status_code == 404
+    assert resp.json()["error"]["message"] == "The requested resource was not found."
     assert "IDOR Paper A" not in resp.text
 
 
@@ -214,8 +211,8 @@ def test_centre_a_cannot_retrieve_centre_b_paper(client, two_papers, centre_a):
 
     resp = client.get(f"/api/v1/papers/{paper_b_id}/retrieve", headers=auth_header(centre_a))
 
-    assert resp.status_code == 403
-    assert resp.json()["error"]["message"] == "You are not authorized to access this paper."
+    assert resp.status_code == 404
+    assert resp.json()["error"]["message"] == "The requested resource was not found."
     # Never the PDF, nor any fragment of it, nor its content-type.
     assert resp.headers.get("content-type", "").startswith("application/json")
     assert b"%PDF" not in resp.content
@@ -226,8 +223,8 @@ def test_centre_b_cannot_retrieve_centre_a_paper(client, two_papers, centre_b):
 
     resp = client.get(f"/api/v1/papers/{paper_a_id}/retrieve", headers=auth_header(centre_b))
 
-    assert resp.status_code == 403
-    assert resp.json()["error"]["message"] == "You are not authorized to access this paper."
+    assert resp.status_code == 404
+    assert resp.json()["error"]["message"] == "The requested resource was not found."
     assert resp.headers.get("content-type", "").startswith("application/json")
     assert b"%PDF" not in resp.content
 
@@ -261,8 +258,8 @@ def test_cross_centre_retrieval_denial_does_not_weaken_time_lock_or_integrity(
 
     # Centre A was never authorized for this paper at all.
     resp = client.get(f"/api/v1/papers/{paper_id}/retrieve", headers=auth_header(centre_a))
-    assert resp.status_code == 403
-    assert resp.json()["error"]["message"] == "You are not authorized to access this paper."
+    assert resp.status_code == 404
+    assert resp.json()["error"]["message"] == "The requested resource was not found."
 
 
 # ===========================================================================
@@ -442,13 +439,13 @@ def test_uuid_substitution_centre_a_token_with_centre_b_paper_id(client, two_pap
     headers = auth_header(centre_a)
 
     detail_resp = client.get(f"/api/v1/papers/{paper_b_id}", headers=headers)
-    assert detail_resp.status_code == 403
+    assert detail_resp.status_code == 404
 
     retrieve_resp = client.get(f"/api/v1/papers/{paper_b_id}/retrieve", headers=headers)
-    assert retrieve_resp.status_code == 403
+    assert retrieve_resp.status_code == 404
 
     status_resp = client.get(f"/api/v1/papers/{paper_b_id}/status", headers=headers)
-    assert status_resp.status_code == 403
+    assert status_resp.status_code == 404
 
 
 def test_unknown_paper_id_returns_404_not_403(client, centre_a):

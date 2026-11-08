@@ -184,8 +184,8 @@ def test_unauthorized_centre_still_denied_even_after_release_time(
     # Deliberately NOT authorizing the centre.
 
     response = client.get(f"/api/v1/papers/{paper_id}/retrieve", headers=auth_header(exam_centre_principal))
-    assert response.status_code == 403
-    assert "not authorized" in response.json()["error"]["message"].lower()
+    assert response.status_code == 404
+    assert response.json()["error"]["message"] == "The requested resource was not found."
 
 
 # --- 7. Authorized centre CAN retrieve after release (end-to-end) ---
